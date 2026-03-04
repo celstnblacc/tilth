@@ -1,3 +1,4 @@
+use std::collections::HashSet;
 use std::fmt::Write as _;
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -18,6 +19,12 @@ use crate::types::FileType;
 const MAX_MATCHES: usize = 10;
 /// Stop walking once we have this many raw matches. Generous headroom for dedup + ranking.
 const EARLY_QUIT_THRESHOLD: usize = 30;
+/// Max unique caller functions to trace for 2nd hop. Above this = wide fan-out, skip.
+const IMPACT_FANOUT_THRESHOLD: usize = 10;
+/// Max 2nd-hop results to display.
+const IMPACT_MAX_RESULTS: usize = 15;
+/// Early quit for batch caller search.
+const BATCH_EARLY_QUIT: usize = 50;
 
 /// A single caller match — a call site of a target symbol.
 #[derive(Debug)]
@@ -205,6 +212,192 @@ fn find_callers_treesitter(
     callers
 }
 
+/// Find all call sites of any symbol in `targets` across the codebase using a single walk.
+/// Returns tuples of (target_name, match) so callers know which symbol was matched.
+fn find_callers_batch(
+    targets: &HashSet<String>,
+    scope: &Path,
+    bloom: &crate::index::bloom::BloomFilterCache,
+) -> Result<Vec<(String, CallerMatch)>, TilthError> {
+    let matches: Mutex<Vec<(String, CallerMatch)>> = Mutex::new(Vec::new());
+    let found_count = AtomicUsize::new(0);
+
+    let walker = super::walker(scope);
+
+    walker.run(|| {
+        let matches = &matches;
+        let found_count = &found_count;
+
+        Box::new(move |entry| {
+            // Early termination: enough callers found
+            if found_count.load(Ordering::Relaxed) >= BATCH_EARLY_QUIT {
+                return ignore::WalkState::Quit;
+            }
+
+            let Ok(entry) = entry else {
+                return ignore::WalkState::Continue;
+            };
+
+            if !entry.file_type().is_some_and(|ft| ft.is_file()) {
+                return ignore::WalkState::Continue;
+            }
+
+            let path = entry.path();
+
+            // Skip oversized files
+            if let Ok(meta) = std::fs::metadata(path) {
+                if meta.len() > 500_000 {
+                    return ignore::WalkState::Continue;
+                }
+            }
+
+            // Single read: read file once, use buffer for both check and parse
+            let Ok(content) = fs::read_to_string(path) else {
+                return ignore::WalkState::Continue;
+            };
+
+            // Bloom pre-filter: skip if none of the targets are definitely in the file
+            let mtime = std::fs::metadata(path)
+                .and_then(|m| m.modified())
+                .unwrap_or(std::time::SystemTime::UNIX_EPOCH);
+            if !targets
+                .iter()
+                .any(|t| bloom.contains(path, mtime, &content, t))
+            {
+                return ignore::WalkState::Continue;
+            }
+
+            // Fast byte check via memchr::memmem (SIMD) — skip files without any target symbol
+            if !targets
+                .iter()
+                .any(|t| memchr::memmem::find(content.as_bytes(), t.as_bytes()).is_some())
+            {
+                return ignore::WalkState::Continue;
+            }
+
+            // Only process files with tree-sitter grammars
+            let file_type = detect_file_type(path);
+            let FileType::Code(lang) = file_type else {
+                return ignore::WalkState::Continue;
+            };
+
+            let Some(ts_lang) = outline_language(lang) else {
+                return ignore::WalkState::Continue;
+            };
+
+            let file_callers =
+                find_callers_treesitter_batch(path, targets, &ts_lang, &content, lang);
+
+            if !file_callers.is_empty() {
+                found_count.fetch_add(file_callers.len(), Ordering::Relaxed);
+                let mut all = matches
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
+                all.extend(file_callers);
+            }
+
+            ignore::WalkState::Continue
+        })
+    });
+
+    Ok(matches
+        .into_inner()
+        .unwrap_or_else(std::sync::PoisonError::into_inner))
+}
+
+/// Tree-sitter call site detection for a set of target symbols.
+/// Returns tuples of (matched_target_name, CallerMatch).
+fn find_callers_treesitter_batch(
+    path: &Path,
+    targets: &HashSet<String>,
+    ts_lang: &tree_sitter::Language,
+    content: &str,
+    lang: crate::types::Lang,
+) -> Vec<(String, CallerMatch)> {
+    // Get the query string for this language
+    let Some(query_str) = super::callees::callee_query_str(lang) else {
+        return Vec::new();
+    };
+
+    // Compile the query
+    let Ok(query) = tree_sitter::Query::new(ts_lang, query_str) else {
+        return Vec::new();
+    };
+
+    let Some(callee_idx) = query.capture_index_for_name("callee") else {
+        return Vec::new();
+    };
+
+    let mut parser = tree_sitter::Parser::new();
+    if parser.set_language(ts_lang).is_err() {
+        return Vec::new();
+    }
+
+    let Some(tree) = parser.parse(content, None) else {
+        return Vec::new();
+    };
+
+    let content_bytes = content.as_bytes();
+    let lines: Vec<&str> = content.lines().collect();
+    let mut cursor = tree_sitter::QueryCursor::new();
+    let mut matches = cursor.matches(&query, tree.root_node(), content_bytes);
+
+    let mut callers = Vec::new();
+
+    while let Some(m) = matches.next() {
+        for cap in m.captures {
+            if cap.index != callee_idx {
+                continue;
+            }
+
+            // Check if the captured text matches any of our target symbols
+            let Ok(text) = cap.node.utf8_text(content_bytes) else {
+                continue;
+            };
+
+            if !targets.contains(text) {
+                continue;
+            }
+
+            let matched_target = text.to_string();
+
+            // Found a call site! Now walk up to find the calling function
+            let line = cap.node.start_position().row as u32 + 1;
+
+            // Get the call text (the whole call expression, not just the callee)
+            let call_node = cap.node.parent().unwrap_or(cap.node);
+            let same_line = call_node.start_position().row == call_node.end_position().row;
+            let call_text: String = if same_line {
+                let row = call_node.start_position().row;
+                if row < lines.len() {
+                    lines[row].trim().to_string()
+                } else {
+                    matched_target.clone()
+                }
+            } else {
+                matched_target.clone()
+            };
+
+            // Walk up the tree to find the enclosing function
+            let (calling_function, caller_range) = find_enclosing_function(cap.node, &lines);
+
+            callers.push((
+                matched_target,
+                CallerMatch {
+                    path: path.to_path_buf(),
+                    line,
+                    calling_function,
+                    call_text,
+                    caller_range,
+                    content: content.to_string(),
+                },
+            ));
+        }
+    }
+
+    callers
+}
+
 /// Walk up the AST from a node to find the enclosing function definition.
 /// Returns (`function_name`, `line_range`).
 fn find_enclosing_function(
@@ -260,6 +453,14 @@ pub fn search_callers_expanded(
     rank_callers(&mut sorted_callers, scope, context);
 
     let total = sorted_callers.len();
+
+    // Collect unique caller names BEFORE truncation for accurate fan-out threshold
+    let all_caller_names: HashSet<String> = sorted_callers
+        .iter()
+        .filter(|c| c.calling_function != "<top-level>")
+        .map(|c| c.calling_function.clone())
+        .collect();
+
     sorted_callers.truncate(MAX_MATCHES);
 
     // Format the output
@@ -310,6 +511,67 @@ pub fn search_callers_expanded(
                 }
 
                 output.push_str("```\n");
+            }
+        }
+    }
+
+    // ── Adaptive 2nd-hop impact analysis ──
+    // Use all_caller_names (pre-truncation) for the fan-out threshold check,
+    // but search for callers of the full set to capture transitive impact.
+    if !all_caller_names.is_empty() && all_caller_names.len() <= IMPACT_FANOUT_THRESHOLD {
+        if let Ok(hop2) = find_callers_batch(&all_caller_names, scope, bloom) {
+            // Filter out hop-1 matches (same file+line = same call site)
+            let hop1_locations: HashSet<(PathBuf, u32)> = sorted_callers
+                .iter()
+                .map(|c| (c.path.clone(), c.line))
+                .collect();
+
+            let hop2_filtered: Vec<_> = hop2
+                .into_iter()
+                .filter(|(_, m)| !hop1_locations.contains(&(m.path.clone(), m.line)))
+                .collect();
+
+            if !hop2_filtered.is_empty() {
+                output.push_str("\n── impact (2nd hop) ──\n");
+
+                let mut seen: HashSet<(String, PathBuf)> = HashSet::new();
+                let mut count = 0;
+                for (via, m) in &hop2_filtered {
+                    let key = (m.calling_function.clone(), m.path.clone());
+                    if !seen.insert(key) {
+                        continue;
+                    }
+                    if count >= IMPACT_MAX_RESULTS {
+                        break;
+                    }
+
+                    let rel_path = m.path.strip_prefix(scope).unwrap_or(&m.path).display();
+                    let _ = writeln!(
+                        output,
+                        "  {:<20} {}:{}  \u{2192} {}",
+                        m.calling_function, rel_path, m.line, via
+                    );
+                    count += 1;
+                }
+
+                let unique_total = hop2_filtered
+                    .iter()
+                    .map(|(_, m)| (&m.calling_function, &m.path))
+                    .collect::<HashSet<_>>()
+                    .len();
+                if unique_total > IMPACT_MAX_RESULTS {
+                    let _ = writeln!(
+                        output,
+                        "  ... and {} more",
+                        unique_total - IMPACT_MAX_RESULTS
+                    );
+                }
+
+                let _ = writeln!(
+                    output,
+                    "\n{} functions affected across 2 hops.",
+                    sorted_callers.len() + count
+                );
             }
         }
     }

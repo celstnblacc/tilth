@@ -13,7 +13,7 @@ use crate::error::TilthError;
 use crate::format;
 use crate::types::{estimate_tokens, FileType, Lang, ViewMode};
 
-pub(crate) const TOKEN_THRESHOLD: u64 = 3_500;
+pub(crate) const TOKEN_THRESHOLD: u64 = 6_000;
 const FILE_SIZE_CAP: u64 = 500_000; // 500KB
 
 /// Main entry point for read mode. Routes through the decision tree.

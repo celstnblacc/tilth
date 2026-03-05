@@ -2,14 +2,14 @@
 
 Automated evaluation of tilth's impact on AI agent code navigation.
 
-## Results — v0.4.4
+## Results — v0.4.5
 
 | Model | Tasks | Runs | Baseline $/correct | tilth $/correct | Change | Baseline acc | tilth acc |
 |---|---|---|---|---|---|---|---|
-| Sonnet 4.5 | 26 | 78 | $0.26 | $0.18 | **-31%** | 96% | 98% |
-| Opus 4.6 | 26 | 52 | $0.20 | $0.16 | **-17%** | 96% | 96% |
+| Sonnet 4.5 | 26 | 78 | $0.26 | $0.17 | **-34%** | 96% | 100% |
+| Opus 4.6 | 26 | 52 | $0.20 | $0.16 | **-19%** | 96% | 96% |
 | Haiku 4.5 | 22† | 65 | $0.17 | $0.11 | **-38%** | 58% | 87% |
-| **Average** | | **195** | **$0.21** | **$0.15** | **-29%** | **83%** | **94%** |
+| **Average** | | **195** | **$0.21** | **$0.15** | **-30%** | **83%** | **95%** |
 
 † Haiku tilth runs filtered to tilth-using only (78% adoption).
 
@@ -27,53 +27,53 @@ expected_cost = cost_per_attempt × (1 / accuracy)
 
 ## Sonnet 4.5 (78 runs)
 
-26 tasks across 4 repos. 26 baseline + 52 tilth runs (2 reps). 94% tilth tool adoption (tilth tools used in 94% of all tool calls).
+26 tasks across 4 repos. 26 baseline + 52 tilth runs (2 reps). 91% tilth tool adoption.
 
 | | Baseline | tilth | Change |
 |---|---|---|---|
-| **Cost per correct answer** | **$0.26** | **$0.18** | **-31%** |
-| Accuracy | 96% (25/26) | 98% (51/52) | +2pp |
-| Avg cost per task | $0.25 | $0.18 | -30% |
-| Avg turns | 9.3 | 8.3 | -11% |
-| Avg context tokens | 225,570 | 251,590 | +12% |
+| **Cost per correct answer** | **$0.26** | **$0.17** | **-34%** |
+| Accuracy | 96% (25/26) | 100% (52/52) | +4pp |
+| Avg cost per task | $0.25 | $0.17 | -31% |
+| Avg turns | 9.3 | 7.8 | -16% |
+| Avg context tokens | 225,570 | 239,856 | +6% |
 
-tilth is cheaper per attempt (-30%) with slightly better accuracy (+2pp). The combined effect: **-31% cost per correct answer**.
+tilth is cheaper per attempt (-31%) with perfect accuracy. The combined effect: **-34% cost per correct answer**.
 
 ### Per-task results
 
 ```
 Task                                       Base    Tilth   Delta  B✓  T✓  Winner
 ─────────────────────────────────────────────────────────────────────────────────
-fastapi_depends_function                  $0.34   $0.09   -73%  1/1 2/2  TILTH ($)
-fastapi_depends_internals                 $0.31   $0.11   -64%  1/1 2/2  TILTH ($)
-rg_trait_implementors                     $0.29   $0.11   -63%  1/1 2/2  TILTH ($)
-fastapi_depends_processing                $0.51   $0.20   -61%  1/1 2/2  TILTH ($)
-rg_lineiter_usage                         $0.30   $0.12   -61%  1/1 2/2  TILTH ($)
-find_definition                           $0.10   $0.05   -50%  1/1 2/2  TILTH ($)
-gin_client_ip                             $0.38   $0.21   -46%  1/1 2/2  TILTH ($)
-read_large_file                           $0.12   $0.07   -40%  1/1 2/2  TILTH ($)
-fastapi_dependency_resolution             $0.45   $0.31   -30%  1/1 2/2  TILTH ($)
-edit_task                                 $0.09   $0.06   -29%  1/1 2/2  TILTH ($)
-fastapi_request_validation                $0.26   $0.19   -28%  1/1 2/2  TILTH ($)
-express_res_send                          $0.15   $0.11   -25%  1/1 2/2  TILTH ($)
-gin_middleware_chain                      $0.49   $0.38   -22%  1/1 2/2  TILTH ($)
-codebase_navigation                       $0.18   $0.14   -22%  1/1 2/2  TILTH ($)
-rg_flag_definition                        $0.11   $0.09   -20%  1/1 2/2  TILTH ($)
-express_json_send                         $0.26   $0.22   -15%  1/1 2/2  TILTH ($)
-rg_walker_parallel                        $0.28   $0.24   -15%  1/1 2/2  TILTH ($)
-rg_lineiter_definition                    $0.11   $0.10   -13%  1/1 2/2  TILTH ($)
-gin_servehttp_flow                        $0.37   $0.32   -13%  1/1 2/2  TILTH ($)
-─────────────────────────────────────────────────────────────────────────────────
-gin_context_next                          $0.05   $0.05    -4%  1/1 2/2  ~tie
-express_render_chain                      $0.26   $0.25    -3%  1/1 2/2  ~tie
-─────────────────────────────────────────────────────────────────────────────────
 express_app_render                          inf   $0.17     ↓∞  0/1 2/2  TILTH (acc)
-express_app_init                          $0.15   $0.17   +16%  1/1 2/2  BASE ($)
-markdown_section                          $0.06   $0.07   +17%  1/1 2/2  BASE ($)
-gin_radix_tree                            $0.14   $0.19   +35%  1/1 2/2  BASE ($)
-rg_search_dispatch                        $0.56   $1.06   +90%  1/1 1/2  BASE (acc)
+fastapi_depends_function                  $0.34   $0.08   -78%  1/1 2/2  TILTH ($)
+rg_trait_implementors                     $0.29   $0.07   -75%  1/1 2/2  TILTH ($)
+rg_lineiter_usage                         $0.30   $0.10   -68%  1/1 2/2  TILTH ($)
+fastapi_depends_internals                 $0.31   $0.12   -60%  1/1 2/2  TILTH ($)
+fastapi_depends_processing                $0.51   $0.21   -59%  1/1 2/2  TILTH ($)
+find_definition                           $0.10   $0.05   -50%  1/1 2/2  TILTH ($)
+gin_client_ip                             $0.38   $0.19   -50%  1/1 2/2  TILTH ($)
+read_large_file                           $0.12   $0.07   -40%  1/1 2/2  TILTH ($)
+express_res_send                          $0.15   $0.10   -36%  1/1 2/2  TILTH ($)
+rg_walker_parallel                        $0.28   $0.18   -36%  1/1 2/2  TILTH ($)
+edit_task                                 $0.09   $0.06   -30%  1/1 2/2  TILTH ($)
+rg_flag_definition                        $0.11   $0.08   -26%  1/1 2/2  TILTH ($)
+rg_search_dispatch                        $0.56   $0.42   -26%  1/1 2/2  TILTH ($)
+codebase_navigation                       $0.18   $0.14   -25%  1/1 2/2  TILTH ($)
+gin_middleware_chain                       $0.49   $0.39   -22%  1/1 2/2  TILTH ($)
+fastapi_request_validation                $0.26   $0.21   -19%  1/1 2/2  TILTH ($)
+fastapi_dependency_resolution             $0.45   $0.40   -12%  1/1 2/2  TILTH ($)
+express_json_send                         $0.26   $0.23   -11%  1/1 2/2  TILTH ($)
 ─────────────────────────────────────────────────────────────────────────────────
-W20 T2 L4
+gin_servehttp_flow                        $0.37   $0.34    -8%  1/1 2/2  ~tie
+rg_lineiter_definition                    $0.11   $0.11    -3%  1/1 2/2  ~tie
+express_render_chain                      $0.26   $0.25    -2%  1/1 2/2  ~tie
+markdown_section                          $0.06   $0.06    +1%  1/1 2/2  ~tie
+gin_radix_tree                            $0.14   $0.15    +9%  1/1 2/2  ~tie
+─────────────────────────────────────────────────────────────────────────────────
+express_app_init                          $0.15   $0.17   +14%  1/1 2/2  BASE ($)
+gin_context_next                          $0.05   $0.10   +82%  1/1 2/2  BASE ($)
+─────────────────────────────────────────────────────────────────────────────────
+W19 T5 L2
 ```
 
 Costs are $/correct (avg_cost / accuracy). Winner: accuracy difference > 15pp first, then >=10% cost difference.
@@ -82,64 +82,64 @@ Costs are $/correct (avg_cost / accuracy). Winner: accuracy difference > 15pp fi
 
 | Repo | Language | $/correct (B → T) | Accuracy (B → T) |
 |---|---|---|---|
-| FastAPI | Python | $0.38 → $0.18 (-52%) | 100% → 100% |
+| FastAPI | Python | $0.38 → $0.20 (-46%) | 100% → 100% |
+| ripgrep | Rust | $0.28 → $0.16 (-42%) | 100% → 100% |
+| Synthetic | Multi | $0.11 → $0.08 (-31%) | 100% → 100% |
 | Express | JS | $0.24 → $0.18 (-23%) | 80% → 100% |
-| Gin | Go | $0.29 → $0.23 (-20%) | 100% → 100% |
-| ripgrep | Rust | $0.28 → $0.22 (-22%) | 100% → 92% |
-| Synthetic | Multi | $0.11 → $0.08 (-28%) | 100% → 100% |
+| Gin | Go | $0.29 → $0.23 (-19%) | 100% → 100% |
 
-Python sees the largest improvement: cost per correct answer drops 52% with perfect accuracy. All languages improve. `express_app_render` — previously unsolved by Sonnet — is now solved in both tilth runs. `rg_search_dispatch` remains intermittent (1/2 tilth runs succeed).
+Rust sees the largest improvement (-42%) thanks to the read threshold bump — previously outlined files like ripgrep's `sink.rs` now return full content, eliminating multi-read spirals. All languages improve. `express_app_render` — previously unsolved by Sonnet — is solved in both tilth runs. `rg_search_dispatch` — previously intermittent — now succeeds 2/2.
 
 ## Opus 4.6 (52 runs)
 
-26 tasks across 4 repos. 26 baseline + 26 tilth runs. 95% tilth tool adoption.
+26 tasks across 4 repos. 26 baseline + 26 tilth runs. 96% tilth tool adoption.
 
 | | Baseline | tilth | Change |
 |---|---|---|---|
-| **Cost per correct answer** | **$0.20** | **$0.16** | **-17%** |
+| **Cost per correct answer** | **$0.20** | **$0.16** | **-19%** |
 | Accuracy | 96% (25/26) | 96% (25/26) | 0pp |
-| Avg cost per task | $0.19 | $0.16 | -16% |
-| Avg turns | 8.5 | 6.8 | -20% |
-| Avg context tokens | 160,415 | 155,499 | -3% |
+| Avg cost per task | $0.19 | $0.15 | -19% |
+| Avg turns | 8.5 | 6.7 | -22% |
+| Avg context tokens | 160,415 | 146,868 | -8% |
 
-tilth is cheaper per attempt (-16%) with identical accuracy. Turns drop 20%. The combined effect: **-17% cost per correct answer**.
+tilth is cheaper per attempt (-19%) with identical accuracy. Turns drop 22% and context usage drops 8%. The combined effect: **-19% cost per correct answer**.
 
 ```
 Task                                       Base    Tilth   Delta  B✓  T✓  Winner
 ─────────────────────────────────────────────────────────────────────────────────
-fastapi_depends_internals                 $0.20   $0.09   -58%  1/1 1/1  TILTH ($)
-rg_trait_implementors                     $0.16   $0.08   -51%  1/1 1/1  TILTH ($)
+fastapi_depends_internals                 $0.20   $0.09   -56%  1/1 1/1  TILTH ($)
+rg_trait_implementors                     $0.16   $0.08   -50%  1/1 1/1  TILTH ($)
 codebase_navigation                       $0.21   $0.11   -48%  1/1 1/1  TILTH ($)
-fastapi_depends_processing                $0.35   $0.21   -40%  1/1 1/1  TILTH ($)
-rg_search_dispatch                        $0.66   $0.45   -33%  1/1 1/1  TILTH ($)
-gin_servehttp_flow                        $0.33   $0.23   -30%  1/1 1/1  TILTH ($)
-fastapi_depends_function                  $0.11   $0.09   -21%  1/1 1/1  TILTH ($)
-fastapi_dependency_resolution             $0.41   $0.33   -20%  1/1 1/1  TILTH ($)
-edit_task                                 $0.07   $0.06   -16%  1/1 1/1  TILTH ($)
-express_render_chain                      $0.26   $0.22   -16%  1/1 1/1  TILTH ($)
-gin_middleware_chain                      $0.33   $0.29   -13%  1/1 1/1  TILTH ($)
-markdown_section                          $0.06   $0.06   -12%  1/1 1/1  TILTH ($)
+fastapi_depends_function                  $0.11   $0.07   -41%  1/1 1/1  TILTH ($)
+fastapi_depends_processing                $0.35   $0.22   -39%  1/1 1/1  TILTH ($)
+find_definition                           $0.08   $0.05   -37%  1/1 1/1  TILTH ($)
+rg_search_dispatch                        $0.66   $0.42   -37%  1/1 1/1  TILTH ($)
+fastapi_dependency_resolution             $0.41   $0.26   -35%  1/1 1/1  TILTH ($)
+gin_servehttp_flow                        $0.33   $0.22   -32%  1/1 1/1  TILTH ($)
+gin_middleware_chain                      $0.33   $0.28   -16%  1/1 1/1  TILTH ($)
+edit_task                                 $0.07   $0.06   -15%  1/1 1/1  TILTH ($)
+markdown_section                          $0.06   $0.05   -15%  1/1 1/1  TILTH ($)
 ─────────────────────────────────────────────────────────────────────────────────
-express_json_send                         $0.23   $0.21    -5%  1/1 1/1  ~tie
-rg_flag_definition                        $0.07   $0.06    -5%  1/1 1/1  ~tie
-rg_lineiter_usage                         $0.09   $0.08    -5%  1/1 1/1  ~tie
-fastapi_request_validation                $0.19   $0.18    -3%  1/1 1/1  ~tie
-rg_lineiter_definition                    $0.06   $0.06    -2%  1/1 1/1  ~tie
+fastapi_request_validation                $0.19   $0.17    -8%  1/1 1/1  ~tie
+express_json_send                         $0.23   $0.21    -8%  1/1 1/1  ~tie
+rg_flag_definition                        $0.07   $0.06    -6%  1/1 1/1  ~tie
+express_render_chain                      $0.26   $0.26    -0%  1/1 1/1  ~tie
 read_large_file                             inf     inf    ---  0/1 0/1  ~tie
-gin_client_ip                             $0.17   $0.17    +1%  1/1 1/1  ~tie
-express_app_init                          $0.18   $0.19    +8%  1/1 1/1  ~tie
-rg_walker_parallel                        $0.19   $0.21    +9%  1/1 1/1  ~tie
+rg_lineiter_definition                    $0.06   $0.07    +3%  1/1 1/1  ~tie
+gin_radix_tree                            $0.15   $0.15    +4%  1/1 1/1  ~tie
+gin_client_ip                             $0.17   $0.18    +6%  1/1 1/1  ~tie
+express_app_init                          $0.18   $0.20   +10%  1/1 1/1  ~tie
 ─────────────────────────────────────────────────────────────────────────────────
-find_definition                           $0.08   $0.09   +15%  1/1 1/1  BASE ($)
-gin_context_next                          $0.05   $0.06   +23%  1/1 1/1  BASE ($)
-express_app_render                        $0.14   $0.17   +24%  1/1 1/1  BASE ($)
-express_res_send                          $0.09   $0.11   +31%  1/1 1/1  BASE ($)
-gin_radix_tree                            $0.15   $0.21   +41%  1/1 1/1  BASE ($)
+rg_walker_parallel                        $0.19   $0.22   +13%  1/1 1/1  BASE ($)
+gin_context_next                          $0.05   $0.06   +20%  1/1 1/1  BASE ($)
+express_app_render                        $0.14   $0.17   +25%  1/1 1/1  BASE ($)
+rg_lineiter_usage                         $0.09   $0.12   +40%  1/1 1/1  BASE ($)
+express_res_send                          $0.09   $0.12   +41%  1/1 1/1  BASE ($)
 ─────────────────────────────────────────────────────────────────────────────────
 W12 T9 L5
 ```
 
-Both modes fail only `read_large_file`. Opus wins 12 tasks, mainly Python and complex Rust tracing. Losses are small tasks where baseline is already cheap.
+Both modes fail only `read_large_file`. Opus wins 12 tasks, mainly Python and complex Rust tracing. Losses are small tasks where baseline is already cheap. `gin_radix_tree` — previously a -41% regression — is now a ~tie after the read threshold bump.
 
 ## Haiku 4.5 (65 runs†)
 
@@ -168,28 +168,28 @@ Haiku tilth adoption improved from 42% (v0.4.1) to 78% — but still not 100%. U
 | Model | tilth_search/run | tilth_read/run | tilth_files/run | Host tools/run | Adoption rate |
 |---|---|---|---|---|---|
 | Haiku 4.5 | 0.9 | 4.5 | 0.8 | 3.9 | 62% |
-| Sonnet 4.5 | 2.1 | 3.9 | 0.8 | 0.4 | 94% |
-| Opus 4.6 | 1.8 | 3.0 | 0.7 | 0.3 | 95% |
+| Sonnet 4.5 | 2.0 | 3.3 | 0.9 | 0.6 | 91% |
+| Opus 4.6 | 2.0 | 3.0 | 0.4 | 0.2 | 96% |
 
-Adoption scales with model capability: Haiku 62%, Sonnet 94%, Opus 95%. Haiku tilth adoption nearly doubled from 42% (v0.4.1) to 62% but still falls short — forced mode (`--disallowedTools`) remains recommended for smaller models.
+Adoption scales with model capability: Haiku 62%, Sonnet 91%, Opus 96%. Haiku tilth adoption nearly doubled from 42% (v0.4.1) to 62% but still falls short — forced mode (`--disallowedTools`) remains recommended for smaller models.
 
 ### Where tilth wins
 
-**fastapi_depends_function (-73% $/correct on Sonnet):** tilth's search results surface the function with full context and callees. Baseline takes 3x more tool calls to assemble the same picture.
+**fastapi_depends_function (-78% $/correct on Sonnet):** tilth's search results surface the function with full context and callees. Baseline takes 3x more tool calls to assemble the same picture.
 
-**fastapi_depends_internals (-64% Sonnet, -58% Opus):** tilth's callee footer resolves the dependency chain in a single search. Consistent wins across models.
+**rg_trait_implementors (-75% Sonnet, -50% Opus):** Structural search finds all trait implementations efficiently. Baseline needs multiple grep/read cycles.
 
-**rg_trait_implementors (-63% Sonnet, -51% Opus):** Structural search finds all trait implementations efficiently. Baseline needs multiple grep/read cycles.
+**fastapi_depends_internals (-60% Sonnet, -56% Opus):** tilth's callee footer resolves the dependency chain in a single search. Consistent wins across models.
 
-**Python overall (-52% $/correct on Sonnet):** All 5 FastAPI tasks improve with tilth. Perfect accuracy, cost drops across the board.
+**Rust overall (-42% $/correct on Sonnet):** The read threshold bump from ~3500 to ~6000 tokens eliminated multi-read spirals on mid-sized Rust files. `rg_search_dispatch` flipped from +90% regression to -26% win.
 
 ### Where tilth loses
 
-**gin_radix_tree (+35% Sonnet, +41% Opus):** Simple tree traversal task. Baseline solves it cheaply; tilth explores more but doesn't need to.
+**gin_context_next (+82% Sonnet, +20% Opus):** Simple struct field lookup. Baseline reads one file cheaply; tilth's search overhead isn't worthwhile on trivial tasks.
 
-**rg_search_dispatch (+90% Sonnet, -33% Opus):** Complex Rust dispatch tracing. Sonnet tilth fails intermittently (1/2 runs). Opus solves it consistently with tilth at -33%.
+**express_app_render (+25% Opus):** Deep render chain tracing. Sonnet tilth solves this (2/2) where baseline can't, but Opus baseline is already efficient here.
 
-**express_app_render (solved by tilth Sonnet, fails both Opus modes):** Deep render chain tracing. v0.4.4 tilth Sonnet now solves this (2/2 runs) — previously unsolved.
+**express_res_send (+41% Opus):** Short call chain where baseline's single Read is faster than tilth's search + read pattern.
 
 ## Methodology
 
@@ -291,5 +291,6 @@ Good tasks have unambiguous correct answers that can be verified by string match
 | v0.4.0 | def_weight ranking, basename boost, impl collector, sibling surfacing, transitive callees, faceted results, cognitive load stripping, smart truncation, symbol index, bloom filters | **-17%** (Sonnet), **-20%** (Opus) |
 | v0.4.1 | Instruction tuning: "Replaces X" tool descriptions, explicit host tool naming in SERVER_INSTRUCTIONS | **-29%** (Sonnet), **-22%** (Opus) |
 | v0.4.4 | Adaptive 2nd-hop impact analysis for callers search, full 26-task Opus benchmark, Haiku adoption improvements | **-31%** (Sonnet), **-17%** (Opus), **-38%** (Haiku) |
+| v0.4.5 | Read threshold bump from ~3500 to ~6000 tokens | **-34%** (Sonnet), **-19%** (Opus), **-38%** (Haiku) |
 
-v0.4.4 focus: callers search now includes adaptive 2nd-hop impact analysis — when a function has ≤10 unique callers, tilth automatically finds callers-of-callers in a single scan. Full 26-task baseline for Opus (previously 5 hard tasks only). Haiku tilth adoption improved from 42% to 78%, and the accuracy gain (+29pp) now translates to -38% $/correct — a reversal from v0.4.1 where tilth cost more on Haiku.
+v0.4.5 focus: bumped `TOKEN_THRESHOLD` from 3500 to 6000 estimated tokens (~24KB). Files in the 14–24KB range now return full content instead of an outline, eliminating multi-read spirals where agents read the entire file via 5–7 sequential `--section` calls. Key fixes: `gin_radix_tree` flipped from +35% regression to ~tie, `rg_search_dispatch` flipped from +90% regression to -26% win (Sonnet now 100% accuracy). Sonnet achieves 100% accuracy across all 52 tilth runs.

@@ -47,16 +47,6 @@ fn collect_touched(
             let sig_end = (entry.start_line as usize + 3).min(entry.end_line as usize);
             edit.start_line <= sig_end && sig_start <= edit.end_line
         }
-        OutlineKind::Struct
-        | OutlineKind::Enum
-        | OutlineKind::Interface
-        | OutlineKind::Class
-        | OutlineKind::TypeAlias => {
-            // Full body is the contract — any overlap triggers.
-            let e_start = entry.start_line as usize;
-            let e_end = entry.end_line as usize;
-            edit.start_line <= e_end && e_start <= edit.end_line
-        }
         _ => false,
     });
 

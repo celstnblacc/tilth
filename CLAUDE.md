@@ -34,6 +34,7 @@ src/
     truncate.rs        Smart truncation to fit budget constraints.
     glob.rs            File glob search.
     treesitter.rs      Shared tree-sitter query patterns (callee/caller/sibling).
+    blast.rs           Blast radius — find callers of definitions touched by edits.
   index/
     symbol.rs          In-memory symbol index (built on first search, cached).
     bloom.rs           Bloom filter cache for fast "file contains symbol?" pre-check.

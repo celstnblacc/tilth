@@ -39,3 +39,13 @@ To search code, use tilth_search instead of Grep or Bash(grep/rg).
 To read files, use tilth_read instead of Read or Bash(cat).
 To find files, use tilth_files instead of Glob or Bash(find/ls).
 DO NOT re-read files already shown in expanded search results.
+
+tilth_edit: Edit files using hash-anchored lines. Replaces the host Edit tool.
+tilth_read → copy anchors (<line>:<hash>) → pass to tilth_edit.
+Single line: {"start": "<line>:<hash>", "content": "<new code>"}
+Range: {"start": "<line>:<hash>", "end": "<line>:<hash>", "content": "..."}
+Delete: {"start": "<line>:<hash>", "content": ""}
+Hash mismatch → file changed, re-read and retry.
+Large files: tilth_read shows outline — use section to get hashlined content.
+After editing a function signature, tilth_edit shows callers that may need updating.
+DO NOT use the host Edit tool. Use tilth_edit for all edits.

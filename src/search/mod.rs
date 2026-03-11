@@ -105,8 +105,7 @@ pub(crate) fn walker(scope: &Path) -> ignore::WalkParallel {
         .ok()
         .and_then(|v| v.parse::<usize>().ok())
         .unwrap_or_else(|| {
-            std::thread::available_parallelism()
-                .map_or(4, |n| (n.get() / 2).clamp(2, 6))
+            std::thread::available_parallelism().map_or(4, |n| (n.get() / 2).clamp(2, 6))
         });
 
     WalkBuilder::new(scope)

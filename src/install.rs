@@ -280,11 +280,7 @@ fn home_dir() -> Result<PathBuf, String> {
 
 /// Merge a tilth server entry into a JSON config under the given servers key.
 /// Extracted for testability — used by `write_json_config` and unit tests.
-fn upsert_json_server(
-    config: &mut Value,
-    servers_key: &str,
-    entry: Value,
-) -> Result<(), String> {
+fn upsert_json_server(config: &mut Value, servers_key: &str, entry: Value) -> Result<(), String> {
     config
         .as_object_mut()
         .ok_or("config root is not a JSON object")?
@@ -352,10 +348,7 @@ mod tests {
             "should NOT have a nested 'amp' key"
         );
         // Verify tilth entry is inside
-        assert_eq!(
-            config["amp.mcpServers"]["tilth"]["command"],
-            json!("tilth")
-        );
+        assert_eq!(config["amp.mcpServers"]["tilth"]["command"], json!("tilth"));
     }
 
     #[test]
@@ -384,10 +377,7 @@ mod tests {
         let entry = json!({"command": "tilth", "args": ["--mcp"]});
         upsert_json_server(&mut config, "amp.mcpServers", entry).unwrap();
 
-        assert_eq!(
-            config["amp.mcpServers"]["tilth"]["args"],
-            json!(["--mcp"])
-        );
+        assert_eq!(config["amp.mcpServers"]["tilth"]["args"], json!(["--mcp"]));
     }
 
     #[test]

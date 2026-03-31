@@ -153,9 +153,7 @@ fn main() {
             if scope_path.exists() {
                 scope_path
             } else {
-                let cwd_path = std::env::current_dir()
-                    .unwrap_or_default()
-                    .join(&query);
+                let cwd_path = std::env::current_dir().unwrap_or_default().join(&query);
                 if cwd_path.exists() {
                     cwd_path
                 } else {
@@ -169,7 +167,15 @@ fn main() {
     }
 
     let result = if expand > 0 {
-        tilth::run_expanded(&query, &scope, cli.section.as_deref(), cli.budget, full, expand, &cache)
+        tilth::run_expanded(
+            &query,
+            &scope,
+            cli.section.as_deref(),
+            cli.budget,
+            full,
+            expand,
+            &cache,
+        )
     } else if full {
         tilth::run_full(&query, &scope, cli.section.as_deref(), cli.budget, &cache)
     } else {
@@ -179,7 +185,12 @@ fn main() {
     emit_result(result, &query, cli.json, is_tty);
 }
 
-fn emit_result(result: Result<String, tilth::error::TilthError>, query: &str, json: bool, is_tty: bool) {
+fn emit_result(
+    result: Result<String, tilth::error::TilthError>,
+    query: &str,
+    json: bool,
+    is_tty: bool,
+) {
     match result {
         Ok(output) => {
             if json {

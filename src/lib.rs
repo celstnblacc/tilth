@@ -115,14 +115,23 @@ fn run_inner(
 ) -> Result<String, TilthError> {
     let query_type = classify(query, scope);
 
-    let use_expanded = expand > 0
-        && !matches!(query_type, QueryType::FilePath(_) | QueryType::Glob(_));
+    let use_expanded =
+        expand > 0 && !matches!(query_type, QueryType::FilePath(_) | QueryType::Glob(_));
 
     // Multi-symbol: comma-separated identifiers, 2..=5 items
     // Check before main dispatch. Only activate when all parts look like identifiers
     // to avoid hijacking regex (/foo,bar/) or glob (*.{rs,ts}) queries.
-    if query.contains(',') && !matches!(query_type, QueryType::Regex(_) | QueryType::Glob(_) | QueryType::FilePath(_)) {
-        let parts: Vec<&str> = query.split(',').map(str::trim).filter(|s| !s.is_empty()).collect();
+    if query.contains(',')
+        && !matches!(
+            query_type,
+            QueryType::Regex(_) | QueryType::Glob(_) | QueryType::FilePath(_)
+        )
+    {
+        let parts: Vec<&str> = query
+            .split(',')
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .collect();
         let all_identifiers = parts.iter().all(|p| classify::is_identifier(p));
         if parts.len() > 5 && all_identifiers {
             return Err(TilthError::InvalidQuery {
@@ -183,7 +192,14 @@ fn run_inner(
         QueryType::Symbol(name) => {
             if use_expanded {
                 search::search_symbol_expanded(
-                    &name, scope, cache, session.as_ref().unwrap(), sym_index.as_ref().unwrap(), bloom.as_ref().unwrap(), expand, None,
+                    &name,
+                    scope,
+                    cache,
+                    session.as_ref().unwrap(),
+                    sym_index.as_ref().unwrap(),
+                    bloom.as_ref().unwrap(),
+                    expand,
+                    None,
                 )?
             } else {
                 search::search_symbol(&name, scope, cache)?
@@ -195,13 +211,25 @@ fn run_inner(
 
             if is_multi_word && use_expanded {
                 search::search_content_expanded(
-                    &text, scope, cache, session.as_ref().unwrap(), expand, None,
+                    &text,
+                    scope,
+                    cache,
+                    session.as_ref().unwrap(),
+                    expand,
+                    None,
                 )?
             } else if is_multi_word {
                 multi_word_concept_search(&text, scope, cache)?
             } else if use_expanded {
                 search::search_symbol_expanded(
-                    &text, scope, cache, session.as_ref().unwrap(), sym_index.as_ref().unwrap(), bloom.as_ref().unwrap(), expand, None,
+                    &text,
+                    scope,
+                    cache,
+                    session.as_ref().unwrap(),
+                    sym_index.as_ref().unwrap(),
+                    bloom.as_ref().unwrap(),
+                    expand,
+                    None,
                 )?
             } else {
                 // Single-word concept: prefer definitions, then content, then any match.
@@ -213,7 +241,12 @@ fn run_inner(
         QueryType::Content(text) => {
             if use_expanded {
                 search::search_content_expanded(
-                    &text, scope, cache, session.as_ref().unwrap(), expand, None,
+                    &text,
+                    scope,
+                    cache,
+                    session.as_ref().unwrap(),
+                    expand,
+                    None,
                 )?
             } else {
                 search::search_content(&text, scope, cache)?
@@ -223,7 +256,12 @@ fn run_inner(
         QueryType::Regex(pattern) => {
             if use_expanded {
                 search::search_regex_expanded(
-                    &pattern, scope, cache, session.as_ref().unwrap(), expand, None,
+                    &pattern,
+                    scope,
+                    cache,
+                    session.as_ref().unwrap(),
+                    expand,
+                    None,
                 )?
             } else {
                 search::search_regex(&pattern, scope, cache)?
@@ -233,7 +271,14 @@ fn run_inner(
         QueryType::Fallthrough(text) => {
             if use_expanded {
                 search::search_symbol_expanded(
-                    &text, scope, cache, session.as_ref().unwrap(), sym_index.as_ref().unwrap(), bloom.as_ref().unwrap(), expand, None,
+                    &text,
+                    scope,
+                    cache,
+                    session.as_ref().unwrap(),
+                    sym_index.as_ref().unwrap(),
+                    bloom.as_ref().unwrap(),
+                    expand,
+                    None,
                 )?
             } else {
                 single_query_search(&text, scope, cache, false)?

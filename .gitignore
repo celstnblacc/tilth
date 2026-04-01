@@ -28,3 +28,11 @@ benchmark/fixtures/repos/
 benchmark/results/*.jsonl
 benchmark/results/*.md
 !benchmark/results/.gitkeep
+
+# Secrets
+.env
+*.env.*
+*.key
+*.pem
+*.p12
+credentials.*

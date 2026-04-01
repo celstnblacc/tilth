@@ -291,8 +291,18 @@ fn tool_read(
 
             let path_str = p.as_str().ok_or("paths must be an array of strings")?;
             let path = PathBuf::from(path_str);
-            session.record_read(&path);
-            match crate::read::read_file(&path, None, false, cache, edit_mode) {
+
+            // Security: validate path is within CWD (MCP server scope)
+            let validated_path = match crate::security::validate_path_mcp(&path) {
+                Ok(p) => p,
+                Err(e) => {
+                    results.push(format!("# {} — error: {}", path.display(), e));
+                    continue;
+                }
+            };
+
+            session.record_read(&validated_path);
+            match crate::read::read_file(&validated_path, None, false, cache, edit_mode) {
                 Ok(output) => results.push(output),
                 Err(e) => results.push(format!("# {} — error: {}", path.display(), e)),
             }
@@ -307,14 +317,18 @@ fn tool_read(
         .and_then(|v| v.as_str())
         .ok_or("missing required parameter: path (or use paths for batch read)")?;
     let path = PathBuf::from(path_str);
+
+    // Security: validate path is within CWD (MCP server scope)
+    let validated_path = crate::security::validate_path_mcp(&path).map_err(|e| e.to_string())?;
+
     let section = args.get("section").and_then(|v| v.as_str());
     let full = args
         .get("full")
         .and_then(serde_json::Value::as_bool)
         .unwrap_or(false);
 
-    session.record_read(&path);
-    let mut output = crate::read::read_file(&path, section, full, cache, edit_mode)
+    session.record_read(&validated_path);
+    let mut output = crate::read::read_file(&validated_path, section, full, cache, edit_mode)
         .map_err(|e| e.to_string())?;
 
     // Append related-file hint for outlined code files (not section reads, not batch).
@@ -489,6 +503,9 @@ fn tool_edit(
         .ok_or("missing required parameter: path")?;
     let path = PathBuf::from(path_str);
 
+    // Security: validate path is within CWD (MCP server scope)
+    let validated_path = crate::security::validate_path_mcp(&path).map_err(|e| e.to_string())?;
+
     let edits_val = args
         .get("edits")
         .and_then(|v| v.as_array())
@@ -529,9 +546,9 @@ fn tool_edit(
         .and_then(serde_json::Value::as_bool)
         .unwrap_or(false);
 
-    session.record_read(&path);
+    session.record_read(&validated_path);
 
-    match crate::edit::apply_edits(&path, &edits).map_err(|e| e.to_string())? {
+    match crate::edit::apply_edits(&validated_path, &edits).map_err(|e| e.to_string())? {
         crate::edit::EditResult::Applied { diff, context } => {
             let mut output = String::new();
 

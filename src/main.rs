@@ -220,7 +220,9 @@ fn emit_output(output: &str, is_tty: bool) {
     let term_height = terminal_height();
 
     if is_tty && line_count > term_height {
-        let pager = std::env::var("PAGER").unwrap_or_else(|_| "less".into());
+        let pager_raw = std::env::var("PAGER").unwrap_or_else(|_| "less".into());
+        // Security: validate $PAGER to prevent command injection
+        let pager = tilth::security::validate_pager(&pager_raw);
         if let Ok(mut child) = process::Command::new(&pager)
             .arg("-R")
             .stdin(process::Stdio::piped())

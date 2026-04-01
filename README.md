@@ -1,5 +1,22 @@
 # tilth
 
+## This Fork
+
+**Upstream:** [jahala/tilth](https://github.com/jahala/tilth) — forked as [celstnblacc/tilth](https://github.com/celstnblacc/tilth) for use in the [token-diet](https://github.com/celstnblacc/token-diet) stack.
+
+**Why we forked:** tilth is an MCP server — it runs inside the agent's tool loop and has direct filesystem access. Upstream shipped with no path boundary enforcement on MCP tool calls, meaning a prompt-injected path like `../../../../etc/passwd` would be read and returned to the model. We also found a command injection vector via `$PAGER`.
+
+**Security fixes applied (v0.5.7+):**
+
+| Severity | ID | Fix |
+|----------|----|-----|
+| HIGH | P-1 | **Path traversal in `tool_read` / `tool_edit`** — MCP tool paths were not validated against the project root. An MCP client could pass `../../../etc/passwd` or any absolute path to read or overwrite files anywhere on disk. Added `security::validate_path_mcp()` using `canonicalize()` + prefix check. Integrated at all three MCP entry points (`tool_read` single, `tool_read` batch, `tool_edit`). |
+| MEDIUM | P-2 | **Command injection via `$PAGER`** — `emit_output()` passed the `$PAGER` env var directly to `Command::new()`. A malicious `$PAGER=less; rm -rf /` would execute both commands. Added `security::validate_pager()` with an allow-list of safe pager names + shell metacharacter filter. Falls back to `less` on invalid input. |
+
+New module: `src/security.rs` with 13 tests. Run `cargo test --all` to verify.
+
+---
+
 **Smart code reading for humans and AI agents.** Reduces cost per correct answer by **44%** on Sonnet, **39%** on Opus, and **38%** on Haiku across 160 benchmark runs. ([benchmarks](#benchmarks))
 
 tilth is what happens when you give `ripgrep`, `tree-sitter`, and `cat` a shared brain.

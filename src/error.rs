@@ -22,6 +22,10 @@ pub enum TilthError {
         path: PathBuf,
         reason: String,
     },
+    PathTraversal {
+        path: PathBuf,
+        scope: PathBuf,
+    },
 }
 
 impl std::fmt::Display for TilthError {
@@ -46,6 +50,12 @@ impl std::fmt::Display for TilthError {
             Self::ParseError { path, reason } => {
                 write!(f, "parse error in {}: {reason}", path.display())
             }
+            Self::PathTraversal { path, scope } => write!(
+                f,
+                "path traversal blocked: {} is outside scope {}",
+                path.display(),
+                scope.display()
+            ),
         }
     }
 }
@@ -59,7 +69,7 @@ impl TilthError {
         match self {
             Self::NotFound { .. } | Self::IoError { .. } => 2,
             Self::InvalidQuery { .. } | Self::ParseError { .. } => 3,
-            Self::PermissionDenied { .. } => 4,
+            Self::PermissionDenied { .. } | Self::PathTraversal { .. } => 4,
         }
     }
 }

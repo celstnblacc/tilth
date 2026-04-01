@@ -346,7 +346,8 @@ mod tests {
         assert_eq!(validate_pager("evil;cmd"), "less");
     }
 
-    /// Integration test: verify path validation prevents directory traversal in edit operations
+    /// Integration test: verify path validation prevents directory traversal in edit operations.
+    /// Uses validate_path_in_scope directly to avoid racy set_current_dir (process-global).
     #[test]
     fn test_integration_edit_path_traversal() {
         let scope = setup_test_dir("integration_edit");
@@ -357,18 +358,12 @@ mod tests {
         let outside = scope.parent().unwrap().join("forbidden.txt");
         fs::write(&outside, "secret\n").unwrap();
 
-        // Change to scope as CWD
-        let original_dir = std::env::current_dir().unwrap();
-        std::env::set_current_dir(&scope).unwrap();
-
-        // Try to edit file outside scope via ../
-        let evil_path = PathBuf::from("../forbidden.txt");
-
-        // The critical security boundary: validate_path_mcp should block this
-        let validated = validate_path_mcp(&evil_path);
+        // Try to traverse outside scope via ../
+        let evil_path = scope.join("../forbidden.txt");
+        let validated = validate_path_in_scope(&evil_path, &scope);
         assert!(
             matches!(validated, Err(TilthError::PathTraversal { .. })),
-            "validate_path_mcp should block path traversal: {validated:?}"
+            "path traversal should be blocked: {validated:?}"
         );
 
         // Verify the outside file was not modified
@@ -376,15 +371,12 @@ mod tests {
         assert_eq!(outside_content, "secret\n", "outside file should be unchanged");
 
         // Also verify that a legitimate path within scope works
-        let allowed = PathBuf::from("allowed.txt");
-        let validated_allowed = validate_path_mcp(&allowed);
+        let validated_allowed = validate_path_in_scope(&file, &scope);
         assert!(
             validated_allowed.is_ok(),
             "legitimate path should be allowed"
         );
 
-        // Restore original directory
-        std::env::set_current_dir(&original_dir).unwrap();
         let _ = fs::remove_file(&outside);
         let _ = fs::remove_dir_all(&scope);
     }

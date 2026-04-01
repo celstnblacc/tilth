@@ -1,0 +1,22 @@
+# ShipGuard configuration
+# Reviewed 2026-04-01 — celstnblacc/tilth fork of upstream tilth
+# All findings here are pre-existing upstream issues, not introduced by this fork.
+
+severity_threshold: medium
+
+exclude_paths:
+  - "vendor/**"
+  - "node_modules/**"
+  # Benchmark fixtures contain intentional fake credentials (e.g. SECRET_KEY = "your-secret-key-here")
+  # These are example scaffolding code used by tilth's task benchmarking suite, not production secrets.
+  - "benchmark/**"
+
+# Accepted risks (reviewed 2026-04-01)
+disable_rules:
+  # GHA-002: Unpinned GitHub Actions — upstream workflow files, not owned by this fork
+  - GHA-002
+  # SC-004: .gitignore advisory — tracked separately in repo root .gitignore
+  - SC-004
+  # JS-002: Path traversal in npm install scripts — upstream npm wrapper scripts,
+  # paths sourced from package.json manifests (not user input)
+  - JS-002

@@ -36,3 +36,4 @@ benchmark/results/*.md
 *.pem
 *.p12
 credentials.*
+.serena/

@@ -4,6 +4,11 @@ All notable changes to tilth will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
+## [Unreleased]
+
+### Changed
+- Added `.serena/` to `.gitignore` (Serena MCP cache directory)
+
 ## [0.5.7-security.1] (2026-04-01) — celstnblacc/tilth fork
 
 ### Security

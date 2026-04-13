@@ -199,9 +199,18 @@ pub fn apply_edits(path: &Path, edits: &[Edit]) -> Result<EditResult, TilthError
         output.push_str(line_sep);
     }
 
-    fs::write(path, &output).map_err(|e| TilthError::IoError {
-        path: path.to_path_buf(),
+    // Atomic write: write to .tmp then rename — prevents partial writes on crash/interrupt.
+    let tmp = path.with_extension("tmp");
+    fs::write(&tmp, &output).map_err(|e| TilthError::IoError {
+        path: tmp.clone(),
         source: e,
+    })?;
+    fs::rename(&tmp, path).map_err(|e| {
+        let _ = fs::remove_file(&tmp);
+        TilthError::IoError {
+            path: path.to_path_buf(),
+            source: e,
+        }
     })?;
 
     // Phase 4: Build diffs and context around each edit site.

@@ -9,6 +9,8 @@ Records token usage, cost, correctness, and tool usage to JSONL format.
 import argparse
 import json
 import os
+from functools import lru_cache
+import tempfile
 import subprocess
 import sys
 import time
@@ -29,18 +31,35 @@ from config import (
     SYNTHETIC_REPO,
     RESULTS_DIR,
     DEFAULT_REPS,
-    TILTH_MCP_CODEX_ARGS,
+    codex_mcp_args,
+    resolve_tilth_bin,
+    TILTH_MCP_CONFIG,
 )
 from parse import parse_stream_json, parse_codex_json, tool_call_counts
 from tasks import TASKS
 from fixtures.reset import reset_repo, ensure_repo_clean
 
 
+@lru_cache(maxsize=1)
+def _portable_tilth_mcp_config() -> str:
+    """Materialize a temporary MCP config with the resolved tilth binary."""
+    with open(TILTH_MCP_CONFIG, "r", encoding="utf-8") as handle:
+        data = json.load(handle)
+
+    data.setdefault("mcpServers", {}).setdefault("tilth", {})["command"] = resolve_tilth_bin()
+
+    tmp = tempfile.NamedTemporaryFile("w", suffix=".json", delete=False, encoding="utf-8")
+    with tmp:
+        json.dump(data, tmp, indent=2)
+        tmp.write("\n")
+    return tmp.name
+
+
 def _tilth_version() -> Optional[str]:
     """Get installed tilth version via `tilth --version`."""
     try:
         result = subprocess.run(
-            ["/Users/flysikring/.cargo/bin/tilth", "--version"],
+            [resolve_tilth_bin(), "--version"],
             capture_output=True, text=True, timeout=5,
         )
         # Output: "tilth 0.2.1"
@@ -116,7 +135,7 @@ def run_single(
 
         # Add MCP config for tilth modes
         if mode.mcp_config_path:
-            cmd += TILTH_MCP_CODEX_ARGS
+            cmd += codex_mcp_args()
 
         # Codex has no --system-prompt, prepend to prompt
         full_prompt = f"{SYSTEM_PROMPT}\n\n{task.prompt}"
@@ -139,7 +158,7 @@ def run_single(
             cmd += ["--tools", ",".join(mode.tools)]
 
         if mode.mcp_config_path:
-            cmd += ["--mcp-config", mode.mcp_config_path]
+            cmd += ["--mcp-config", _portable_tilth_mcp_config()]
 
         cmd += ["--", task.prompt]
 

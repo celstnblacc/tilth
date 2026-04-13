@@ -77,6 +77,13 @@ enum Command {
         #[arg(long)]
         edit: bool,
     },
+
+    /// Check tilth registration health across all MCP host configs.
+    Doctor {
+        /// Machine-readable JSON output.
+        #[arg(long)]
+        json: bool,
+    },
 }
 
 fn main() {
@@ -97,6 +104,9 @@ fn main() {
                     eprintln!("install error: {e}");
                     process::exit(1);
                 }
+            }
+            Command::Doctor { json } => {
+                tilth::install::doctor(json);
             }
         }
         return;

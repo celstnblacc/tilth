@@ -662,7 +662,7 @@ type UserId = String
 
     #[test]
     fn php_outline_constructs() {
-        let php_code = r#"<?php
+        let php_code = r"<?php
 namespace App\Services;
 
 use App\Support\Client;
@@ -680,7 +680,7 @@ class UserService {
         return $this->client->loadUser($id);
     }
 }
-"#;
+";
 
         let outline = outline(php_code, Lang::Php, 1000);
 

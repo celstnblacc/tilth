@@ -496,6 +496,192 @@ fn claude_desktop_path() -> Result<PathBuf, String> {
     }
 }
 
+// ---------------------------------------------------------------------------
+// Doctor — health check across registered MCP hosts
+// ---------------------------------------------------------------------------
+
+/// Registration status of tilth in one MCP host.
+pub struct HostStatus {
+    pub host: String,
+    pub config_path: PathBuf,
+    pub config_exists: bool,
+    pub registered: bool,
+    pub command: Option<String>,
+    pub command_ok: Option<bool>,
+}
+
+/// Returns true if `cmd` (bare filename) resolves to an executable on `$PATH`,
+/// or if `cmd` is an absolute/relative path pointing to an existing file.
+fn command_in_path(cmd: &str) -> bool {
+    // Absolute or explicitly relative path — check directly.
+    let p = PathBuf::from(cmd);
+    if p.is_absolute() || cmd.contains('/') || cmd.contains('\\') {
+        return p.is_file();
+    }
+    // Bare name — walk PATH.
+    let Some(path_var) = std::env::var_os("PATH") else {
+        return false;
+    };
+    std::env::split_paths(&path_var).any(|dir| dir.join(cmd).is_file())
+}
+
+/// Extract the tilth command registered in `info`'s config file.
+/// Returns `Some((command_string, command_is_reachable))` or `None` when
+/// tilth is not registered (or the config file doesn't exist / is unreadable).
+fn check_registration(info: &HostInfo) -> Option<(String, bool)> {
+    if !info.path.exists() {
+        return None;
+    }
+    let raw = fs::read_to_string(&info.path).ok()?;
+    match &info.format {
+        ConfigFormat::Json { servers_key } => {
+            let config: Value = serde_json::from_str(&raw).ok()?;
+            // JSON Pointer: dots in servers_key are literal per RFC 6901.
+            let pointer = format!("/{servers_key}/tilth");
+            let entry = config.pointer(&pointer)?;
+            let command = entry.get("command")?.as_str()?.to_string();
+            let ok = command_in_path(&command);
+            Some((command, ok))
+        }
+        ConfigFormat::Toml => {
+            let section_start = raw.find("[mcp_servers.tilth]")?;
+            let section = &raw[section_start..];
+            for line in section.lines().skip(1) {
+                if line.trim_start().starts_with('[') {
+                    break; // next section
+                }
+                if let Some(rest) = line.trim_start().strip_prefix("command") {
+                    if let Some(rest) = rest.trim_start().strip_prefix('=') {
+                        let command = rest.trim().trim_matches('"').trim_matches('\'').to_string();
+                        let ok = command_in_path(&command);
+                        return Some((command, ok));
+                    }
+                }
+            }
+            None
+        }
+    }
+}
+
+/// Run `tilth doctor [--json]`.
+///
+/// Iterates all supported hosts, checks whether tilth is registered in each
+/// config file that exists, and reports health status.
+pub fn doctor(json: bool) {
+    let tilth_version = env!("CARGO_PKG_VERSION");
+
+    let mut statuses: Vec<HostStatus> = Vec::new();
+    let mut registered_count = 0usize;
+
+    for &host in SUPPORTED_HOSTS {
+        let Ok(info) = resolve_host(host) else {
+            continue;
+        };
+
+        let config_exists = info.path.exists();
+        let (registered, command, command_ok) = if config_exists {
+            match check_registration(&info) {
+                Some((cmd, ok)) => (true, Some(cmd), Some(ok)),
+                None => (false, None, None),
+            }
+        } else {
+            (false, None, None)
+        };
+
+        if registered {
+            registered_count += 1;
+        }
+
+        statuses.push(HostStatus {
+            host: host.to_string(),
+            config_path: info.path,
+            config_exists,
+            registered,
+            command,
+            command_ok,
+        });
+    }
+
+    let healthy = registered_count > 0;
+
+    if json {
+        // Only include hosts where a config file exists.
+        let hosts_map: serde_json::Map<String, Value> = statuses
+            .iter()
+            .filter(|s| s.config_exists)
+            .map(|s| {
+                let mut obj = serde_json::Map::new();
+                obj.insert("registered".into(), json!(s.registered));
+                obj.insert(
+                    "config_path".into(),
+                    json!(s.config_path.to_string_lossy()),
+                );
+                if let Some(cmd) = &s.command {
+                    obj.insert("command".into(), json!(cmd));
+                }
+                if let Some(ok) = s.command_ok {
+                    obj.insert("command_ok".into(), json!(ok));
+                }
+                (s.host.clone(), Value::Object(obj))
+            })
+            .collect();
+
+        let registered_hosts: Vec<String> = statuses
+            .iter()
+            .filter(|s| s.registered)
+            .map(|s| s.host.clone())
+            .collect();
+
+        let output = json!({
+            "tilth_version": tilth_version,
+            "healthy": healthy,
+            "registered_hosts": registered_hosts,
+            "hosts": hosts_map,
+        });
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&output).expect("doctor output is always serializable")
+        );
+    } else {
+        println!("tilth doctor  v{tilth_version}");
+        println!();
+        let mut any_shown = false;
+        for s in &statuses {
+            if !s.config_exists {
+                continue;
+            }
+            any_shown = true;
+            let status_str = if s.registered {
+                match s.command_ok {
+                    Some(false) => format!(
+                        "✓ registered  ✗ command missing: {}",
+                        s.command.as_deref().unwrap_or("?")
+                    ),
+                    _ => "✓ registered".to_string(),
+                }
+            } else {
+                "✗ config exists — tilth not registered".to_string()
+            };
+            println!("  {:<20} {status_str}", s.host);
+            if s.registered {
+                if let Some(cmd) = &s.command {
+                    println!("    command: {cmd}");
+                }
+            }
+        }
+        if !any_shown {
+            println!("  (no host config files found)");
+        }
+        println!();
+        if healthy {
+            println!("✓ healthy — tilth registered in {registered_count} host(s)");
+        } else {
+            println!("✗ not healthy — tilth not registered in any host");
+            println!("  run: tilth install <host>");
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -874,5 +1060,162 @@ mod tests {
             err.contains("amp"),
             "error should list amp in supported hosts, got: {err}"
         );
+    }
+
+    // -----------------------------------------------------------------------
+    // Doctor — check_registration and command_in_path unit tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn doctor_check_registration_json_registered() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("mcp.json");
+        let content = r#"{"mcpServers":{"tilth":{"command":"/usr/local/bin/tilth","args":["--mcp"]}}}"#;
+        fs::write(&path, content).unwrap();
+
+        let info = HostInfo {
+            path: path.clone(),
+            format: ConfigFormat::Json {
+                servers_key: "mcpServers",
+            },
+            note: None,
+        };
+
+        let result = check_registration(&info);
+        assert!(result.is_some(), "tilth is registered — should return Some");
+        let (cmd, _ok) = result.unwrap();
+        assert_eq!(cmd, "/usr/local/bin/tilth");
+    }
+
+    #[test]
+    fn doctor_check_registration_json_not_registered() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("mcp.json");
+        fs::write(&path, r#"{"mcpServers":{"other":{"command":"foo"}}}"#).unwrap();
+
+        let info = HostInfo {
+            path,
+            format: ConfigFormat::Json {
+                servers_key: "mcpServers",
+            },
+            note: None,
+        };
+
+        assert!(
+            check_registration(&info).is_none(),
+            "tilth not in config — should return None"
+        );
+    }
+
+    #[test]
+    fn doctor_check_registration_toml_registered() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("config.toml");
+        let content = "\n[mcp_servers.tilth]\ncommand = \"/usr/local/bin/tilth\"\nargs = [\"--mcp\"]\n";
+        fs::write(&path, content).unwrap();
+
+        let info = HostInfo {
+            path,
+            format: ConfigFormat::Toml,
+            note: None,
+        };
+
+        let result = check_registration(&info);
+        assert!(result.is_some(), "tilth section present — should return Some");
+        let (cmd, _ok) = result.unwrap();
+        assert_eq!(cmd, "/usr/local/bin/tilth");
+    }
+
+    #[test]
+    fn doctor_check_registration_toml_not_registered() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("config.toml");
+        fs::write(&path, "[other_section]\nkey = \"value\"\n").unwrap();
+
+        let info = HostInfo {
+            path,
+            format: ConfigFormat::Toml,
+            note: None,
+        };
+
+        assert!(
+            check_registration(&info).is_none(),
+            "no tilth section — should return None"
+        );
+    }
+
+    #[test]
+    fn doctor_check_registration_missing_config() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let info = HostInfo {
+            path: dir.path().join("nonexistent.json"),
+            format: ConfigFormat::Json {
+                servers_key: "mcpServers",
+            },
+            note: None,
+        };
+
+        assert!(
+            check_registration(&info).is_none(),
+            "missing config file — should return None"
+        );
+    }
+
+    #[test]
+    fn doctor_command_in_path_found() {
+        // "sh" must exist on any Unix system (and cmd.exe on Windows)
+        #[cfg(not(target_os = "windows"))]
+        assert!(command_in_path("sh"), "sh should be found on PATH");
+    }
+
+    #[test]
+    fn doctor_command_in_path_not_found() {
+        assert!(
+            !command_in_path("__tilth_definitely_not_a_real_binary_xyz123__"),
+            "fake binary should not be found on PATH"
+        );
+    }
+
+    #[test]
+    fn doctor_command_in_path_absolute_existing() {
+        // /bin/sh always exists on Unix
+        #[cfg(not(target_os = "windows"))]
+        {
+            let path = if std::path::Path::new("/bin/sh").exists() {
+                "/bin/sh"
+            } else {
+                "/usr/bin/env"
+            };
+            assert!(command_in_path(path), "{path} should resolve as existing file");
+        }
+    }
+
+    #[test]
+    fn doctor_command_in_path_absolute_missing() {
+        assert!(
+            !command_in_path("/nonexistent/path/to/tilth"),
+            "nonexistent absolute path should return false"
+        );
+    }
+
+    #[test]
+    fn doctor_json_output_is_valid_json() {
+        // Smoke test: doctor(true) should not panic and should produce parseable JSON.
+        // We capture stdout by running the serialisation logic directly.
+        let tilth_version = env!("CARGO_PKG_VERSION");
+        let hosts_map: serde_json::Map<String, Value> = serde_json::Map::new();
+        let registered_hosts: Vec<String> = vec![];
+        let output = json!({
+            "tilth_version": tilth_version,
+            "healthy": false,
+            "registered_hosts": registered_hosts,
+            "hosts": hosts_map,
+        });
+        let s = serde_json::to_string_pretty(&output).unwrap();
+        let parsed: Value = serde_json::from_str(&s).unwrap();
+        assert_eq!(parsed["healthy"], json!(false));
+        assert!(parsed["tilth_version"].is_string());
+        assert!(parsed["registered_hosts"].is_array());
+        assert!(parsed["hosts"].is_object());
     }
 }

@@ -19,3 +19,11 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 ### Added
 
 * `src/security.rs` — new security module with 13 unit tests covering path traversal and pager injection scenarios
+
+## [0.6.1] - 2026-04-13
+
+### Fixed
+- **clippy (Rust 1.94):** resolve 9 lint warnings introduced by new clippy lints
+  - `needless_raw_string_hashes`: drop `r#"…"#` → `r"…"` in 5 test string literals (none contain `"`)
+  - `cast_lossless`: replace `as f64` with `f64::from()` in `bloom.rs`
+  - `doc_markdown`: add backticks around `validate_path_in_scope` and `set_current_dir` in `security.rs`

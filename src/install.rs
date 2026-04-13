@@ -1,5 +1,5 @@
 use std::fs;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use serde_json::{json, Value};
 
@@ -77,9 +77,10 @@ pub fn run(host: &str, edit: bool) -> Result<(), String> {
     }
 
     if edit {
-        eprintln!("✓ tilth (edit mode) added to {}", host_info.path.display());
+        eprintln!("✓ tilth (read+edit mode) added to {}", host_info.path.display());
     } else {
-        eprintln!("✓ tilth added to {}", host_info.path.display());
+        eprintln!("✓ tilth (read-only mode) added to {}", host_info.path.display());
+        eprintln!("  Use --edit to enable write operations (tilth_edit tool).");
     }
     if let Some(note) = host_info.note {
         eprintln!("  {note}");
@@ -106,8 +107,13 @@ fn write_json_config(host_info: &HostInfo, edit: bool) -> Result<(), String> {
 
     let out =
         serde_json::to_string_pretty(&config).expect("serde_json::Value is always serializable");
-    fs::write(&host_info.path, &out)
-        .map_err(|e| format!("failed to write {}: {e}", host_info.path.display()))?;
+
+    // Validate the output parses before touching disk.
+    serde_json::from_str::<Value>(&out)
+        .map_err(|e| format!("post-merge JSON validation failed: {e}"))?;
+
+    backup_file(&host_info.path)?;
+    atomic_write(&host_info.path, out.as_bytes())?;
     Ok(())
 }
 
@@ -151,8 +157,38 @@ fn write_toml_config(host_info: &HostInfo, edit: bool) -> Result<(), String> {
         format!("{existing}{sep}\n{section}")
     };
 
-    fs::write(&host_info.path, &output)
-        .map_err(|e| format!("failed to write {}: {e}", host_info.path.display()))?;
+    backup_file(&host_info.path)?;
+    atomic_write(&host_info.path, output.as_bytes())?;
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// Atomic write + backup helpers
+// ---------------------------------------------------------------------------
+
+/// Write `content` to `path` atomically: write to `path.tmp`, then rename.
+///
+/// Rename is atomic on POSIX filesystems (same volume). On Windows, `fs::rename`
+/// replaces the destination atomically on NTFS since Vista.
+fn atomic_write(path: &Path, content: &[u8]) -> Result<(), String> {
+    let tmp = path.with_extension("tmp");
+    fs::write(&tmp, content)
+        .map_err(|e| format!("failed to write temp file {}: {e}", tmp.display()))?;
+    fs::rename(&tmp, path).map_err(|e| {
+        let _ = fs::remove_file(&tmp); // best-effort cleanup
+        format!("failed to rename {} → {}: {e}", tmp.display(), path.display())
+    })
+}
+
+/// If `path` exists, copy it to `path.bak` before overwriting.
+/// No-op if the file does not exist yet (first install).
+fn backup_file(path: &Path) -> Result<(), String> {
+    if !path.exists() {
+        return Ok(());
+    }
+    let backup = path.with_extension("bak");
+    fs::copy(path, &backup)
+        .map_err(|e| format!("failed to backup {} → {}: {e}", path.display(), backup.display()))?;
     Ok(())
 }
 
@@ -500,6 +536,24 @@ fn claude_desktop_path() -> Result<PathBuf, String> {
 // Doctor — health check across registered MCP hosts
 // ---------------------------------------------------------------------------
 
+/// Trust level of the tilth registration in an MCP host.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum TrustLevel {
+    /// Read-only: no `tilth_edit` tool exposed (default install).
+    ReadOnly,
+    /// Read + edit: `tilth_edit` enabled via `--edit` flag.
+    ReadEdit,
+}
+
+impl TrustLevel {
+    fn as_str(&self) -> &'static str {
+        match self {
+            TrustLevel::ReadOnly => "read_only",
+            TrustLevel::ReadEdit => "read_edit",
+        }
+    }
+}
+
 /// Registration status of tilth in one MCP host.
 pub struct HostStatus {
     pub host: String,
@@ -508,6 +562,7 @@ pub struct HostStatus {
     pub registered: bool,
     pub command: Option<String>,
     pub command_ok: Option<bool>,
+    pub trust_level: Option<TrustLevel>,
 }
 
 /// Returns true if `cmd` (bare filename) resolves to an executable on `$PATH`,
@@ -525,10 +580,10 @@ fn command_in_path(cmd: &str) -> bool {
     std::env::split_paths(&path_var).any(|dir| dir.join(cmd).is_file())
 }
 
-/// Extract the tilth command registered in `info`'s config file.
-/// Returns `Some((command_string, command_is_reachable))` or `None` when
+/// Extract the tilth command and trust level registered in `info`'s config file.
+/// Returns `Some((command_string, command_is_reachable, trust_level))` or `None` when
 /// tilth is not registered (or the config file doesn't exist / is unreadable).
-fn check_registration(info: &HostInfo) -> Option<(String, bool)> {
+fn check_registration(info: &HostInfo) -> Option<(String, bool, TrustLevel)> {
     if !info.path.exists() {
         return None;
     }
@@ -540,25 +595,41 @@ fn check_registration(info: &HostInfo) -> Option<(String, bool)> {
             let pointer = format!("/{servers_key}/tilth");
             let entry = config.pointer(&pointer)?;
             let command = entry.get("command")?.as_str()?.to_string();
+            let args = entry
+                .get("args")
+                .and_then(|a| a.as_array())
+                .map(|arr| arr.iter().filter_map(|v| v.as_str()).collect::<Vec<_>>())
+                .unwrap_or_default();
+            let trust = if args.contains(&"--edit") {
+                TrustLevel::ReadEdit
+            } else {
+                TrustLevel::ReadOnly
+            };
             let ok = command_in_path(&command);
-            Some((command, ok))
+            Some((command, ok, trust))
         }
         ConfigFormat::Toml => {
             let section_start = raw.find("[mcp_servers.tilth]")?;
             let section = &raw[section_start..];
+            let mut command = None;
+            let mut has_edit = false;
             for line in section.lines().skip(1) {
                 if line.trim_start().starts_with('[') {
                     break; // next section
                 }
                 if let Some(rest) = line.trim_start().strip_prefix("command") {
                     if let Some(rest) = rest.trim_start().strip_prefix('=') {
-                        let command = rest.trim().trim_matches('"').trim_matches('\'').to_string();
-                        let ok = command_in_path(&command);
-                        return Some((command, ok));
+                        command = Some(rest.trim().trim_matches('"').trim_matches('\'').to_string());
                     }
                 }
+                if line.contains("\"--edit\"") || line.contains("'--edit'") {
+                    has_edit = true;
+                }
             }
-            None
+            let command = command?;
+            let ok = command_in_path(&command);
+            let trust = if has_edit { TrustLevel::ReadEdit } else { TrustLevel::ReadOnly };
+            Some((command, ok, trust))
         }
     }
 }
@@ -579,13 +650,13 @@ pub fn doctor(json: bool) {
         };
 
         let config_exists = info.path.exists();
-        let (registered, command, command_ok) = if config_exists {
+        let (registered, command, command_ok, trust_level) = if config_exists {
             match check_registration(&info) {
-                Some((cmd, ok)) => (true, Some(cmd), Some(ok)),
-                None => (false, None, None),
+                Some((cmd, ok, trust)) => (true, Some(cmd), Some(ok), Some(trust)),
+                None => (false, None, None, None),
             }
         } else {
-            (false, None, None)
+            (false, None, None, None)
         };
 
         if registered {
@@ -599,6 +670,7 @@ pub fn doctor(json: bool) {
             registered,
             command,
             command_ok,
+            trust_level,
         });
     }
 
@@ -621,6 +693,9 @@ pub fn doctor(json: bool) {
                 }
                 if let Some(ok) = s.command_ok {
                     obj.insert("command_ok".into(), json!(ok));
+                }
+                if let Some(trust) = &s.trust_level {
+                    obj.insert("trust_level".into(), json!(trust.as_str()));
                 }
                 (s.host.clone(), Value::Object(obj))
             })
@@ -652,12 +727,16 @@ pub fn doctor(json: bool) {
             }
             any_shown = true;
             let status_str = if s.registered {
+                let trust_str = match &s.trust_level {
+                    Some(TrustLevel::ReadEdit) => "  [read+edit]",
+                    _ => "  [read-only]",
+                };
                 match s.command_ok {
                     Some(false) => format!(
-                        "✓ registered  ✗ command missing: {}",
+                        "✓ registered{trust_str}  ✗ command missing: {}",
                         s.command.as_deref().unwrap_or("?")
                     ),
-                    _ => "✓ registered".to_string(),
+                    _ => format!("✓ registered{trust_str}"),
                 }
             } else {
                 "✗ config exists — tilth not registered".to_string()
@@ -1051,6 +1130,151 @@ mod tests {
         }
     }
 
+    // -----------------------------------------------------------------------
+    // Atomic write + backup tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn atomic_write_creates_file() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("out.json");
+        atomic_write(&path, b"{\"ok\":true}").unwrap();
+        assert!(path.exists());
+        let content = fs::read_to_string(&path).unwrap();
+        assert!(content.contains("\"ok\""));
+    }
+
+    #[test]
+    fn atomic_write_no_tmp_left_on_success() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("out.json");
+        atomic_write(&path, b"{}").unwrap();
+        let tmp = path.with_extension("tmp");
+        assert!(!tmp.exists(), ".tmp file should be gone after rename");
+    }
+
+    #[test]
+    fn backup_file_creates_bak() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("cfg.json");
+        fs::write(&path, b"{\"original\":true}").unwrap();
+        backup_file(&path).unwrap();
+        let bak = path.with_extension("bak");
+        assert!(bak.exists(), ".bak should be created");
+        let content = fs::read_to_string(&bak).unwrap();
+        assert!(content.contains("\"original\""));
+    }
+
+    #[test]
+    fn backup_file_noop_when_missing() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("nonexistent.json");
+        // Should not error — first install has nothing to back up
+        backup_file(&path).unwrap();
+        assert!(!path.with_extension("bak").exists());
+    }
+
+    #[test]
+    fn install_json_roundtrip_valid() {
+        // write_json_config produces a valid config the next read parses correctly
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("cfg.json");
+        let info = HostInfo {
+            path: path.clone(),
+            format: ConfigFormat::Json { servers_key: "mcpServers" },
+            note: None,
+        };
+        write_json_config(&info, false).unwrap();
+        let raw = fs::read_to_string(&path).unwrap();
+        let v: Value = serde_json::from_str(&raw).expect("output must be valid JSON");
+        assert!(v["mcpServers"]["tilth"].is_object());
+    }
+
+    #[test]
+    fn install_json_creates_backup_on_update() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("cfg.json");
+        // First write
+        let info = HostInfo { path: path.clone(), format: ConfigFormat::Json { servers_key: "mcpServers" }, note: None };
+        write_json_config(&info, false).unwrap();
+        // Second write should produce a .bak
+        write_json_config(&info, false).unwrap();
+        assert!(path.with_extension("bak").exists(), ".bak should be created on second write");
+    }
+
+    #[test]
+    fn install_toml_roundtrip_valid() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("config.toml");
+        let info = HostInfo { path: path.clone(), format: ConfigFormat::Toml, note: None };
+        write_toml_config(&info, false).unwrap();
+        let raw = fs::read_to_string(&path).unwrap();
+        assert!(raw.contains("[mcp_servers.tilth]"), "TOML must contain section");
+        assert!(raw.contains("command ="), "TOML must contain command");
+    }
+
+    #[test]
+    fn install_toml_creates_backup_on_update() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("config.toml");
+        let info = HostInfo { path: path.clone(), format: ConfigFormat::Toml, note: None };
+        write_toml_config(&info, false).unwrap();
+        write_toml_config(&info, false).unwrap();
+        assert!(path.with_extension("bak").exists(), ".bak should be created on second write");
+    }
+
+    // -----------------------------------------------------------------------
+    // Trust level detection tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn trust_level_read_only_when_no_edit_flag() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("mcp.json");
+        let content = r#"{"mcpServers":{"tilth":{"command":"tilth","args":["--mcp"]}}}"#;
+        fs::write(&path, content).unwrap();
+        let info = HostInfo { path, format: ConfigFormat::Json { servers_key: "mcpServers" }, note: None };
+        let (_, _, trust) = check_registration(&info).unwrap();
+        assert_eq!(trust, TrustLevel::ReadOnly);
+    }
+
+    #[test]
+    fn trust_level_read_edit_when_edit_flag_present() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("mcp.json");
+        let content = r#"{"mcpServers":{"tilth":{"command":"tilth","args":["--mcp","--edit"]}}}"#;
+        fs::write(&path, content).unwrap();
+        let info = HostInfo { path, format: ConfigFormat::Json { servers_key: "mcpServers" }, note: None };
+        let (_, _, trust) = check_registration(&info).unwrap();
+        assert_eq!(trust, TrustLevel::ReadEdit);
+    }
+
+    #[test]
+    fn trust_level_toml_read_only() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("config.toml");
+        fs::write(&path, "\n[mcp_servers.tilth]\ncommand = \"tilth\"\nargs = [\"--mcp\"]\n").unwrap();
+        let info = HostInfo { path, format: ConfigFormat::Toml, note: None };
+        let (_, _, trust) = check_registration(&info).unwrap();
+        assert_eq!(trust, TrustLevel::ReadOnly);
+    }
+
+    #[test]
+    fn trust_level_toml_read_edit() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("config.toml");
+        fs::write(&path, "\n[mcp_servers.tilth]\ncommand = \"tilth\"\nargs = [\"--mcp\", \"--edit\"]\n").unwrap();
+        let info = HostInfo { path, format: ConfigFormat::Toml, note: None };
+        let (_, _, trust) = check_registration(&info).unwrap();
+        assert_eq!(trust, TrustLevel::ReadEdit);
+    }
+
+    #[test]
+    fn trust_level_as_str() {
+        assert_eq!(TrustLevel::ReadOnly.as_str(), "read_only");
+        assert_eq!(TrustLevel::ReadEdit.as_str(), "read_edit");
+    }
+
     #[test]
     fn unknown_host_error_includes_amp() {
         let err = resolve_host("nope")
@@ -1083,7 +1307,7 @@ mod tests {
 
         let result = check_registration(&info);
         assert!(result.is_some(), "tilth is registered — should return Some");
-        let (cmd, _ok) = result.unwrap();
+        let (cmd, _ok, _trust) = result.unwrap();
         assert_eq!(cmd, "/usr/local/bin/tilth");
     }
 
@@ -1122,7 +1346,7 @@ mod tests {
 
         let result = check_registration(&info);
         assert!(result.is_some(), "tilth section present — should return Some");
-        let (cmd, _ok) = result.unwrap();
+        let (cmd, _ok, _trust) = result.unwrap();
         assert_eq!(cmd, "/usr/local/bin/tilth");
     }
 

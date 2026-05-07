@@ -27,3 +27,4 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
   - `needless_raw_string_hashes`: drop `r#"…"#` → `r"…"` in 5 test string literals (none contain `"`)
   - `cast_lossless`: replace `as f64` with `f64::from()` in `bloom.rs`
   - `doc_markdown`: add backticks around `validate_path_in_scope` and `set_current_dir` in `security.rs`
+- 2026-05-07: feat(install): add keylogger-mcp-wrapper support in tilth_command_and_args() — transparent MCP proxy logging controlled by KEYLOGGER_MCP env var

@@ -14,3 +14,5 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 ### Added
 
 * `src/security.rs` — new security module with 13 unit tests covering path traversal and pager injection scenarios
+
+- 2026-05-07: feat(install): add keylogger-mcp-wrapper support in tilth_command_and_args() — transparent MCP proxy logging controlled by KEYLOGGER_MCP env var

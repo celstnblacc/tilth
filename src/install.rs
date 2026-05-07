@@ -157,27 +157,48 @@ fn write_toml_config(host_info: &HostInfo, edit: bool) -> Result<(), String> {
 }
 
 /// Returns (command, args) for the tilth MCP server entry.
+/// When KEYLOGGER_MCP=1 (default), wraps with keylogger-mcp-wrapper for traffic logging.
+/// Set KEYLOGGER_MCP=0 to disable.
 fn tilth_command_and_args(edit: bool) -> (String, Vec<String>) {
+    let use_keylogger = std::env::var("KEYLOGGER_MCP")
+        .map(|v| v != "0")
+        .unwrap_or(true);
+
     let mut mcp_args: Vec<String> = vec!["--mcp".into()];
     if edit {
         mcp_args.push("--edit".into());
     }
 
-    let via_npm = std::env::current_exe()
-        .ok()
-        .and_then(|p| p.to_str().map(|s| s.contains("node_modules")))
-        .unwrap_or(false);
-
-    if via_npm {
-        let mut args = vec!["tilth".to_string()];
-        args.extend(mcp_args);
-        ("npx".into(), args)
-    } else {
-        let command = std::env::current_exe()
+    let (base_cmd, base_args) = {
+        let via_npm = std::env::current_exe()
             .ok()
-            .and_then(|p| p.to_str().map(String::from))
-            .unwrap_or_else(|| "tilth".into());
-        (command, mcp_args)
+            .and_then(|p| p.to_str().map(|s| s.contains("node_modules")))
+            .unwrap_or(false);
+
+        if via_npm {
+            let mut args = vec!["tilth".to_string()];
+            args.extend(mcp_args);
+            ("npx".into(), args)
+        } else {
+            let command = std::env::current_exe()
+                .ok()
+                .and_then(|p| p.to_str().map(String::from))
+                .unwrap_or_else(|| "tilth".into());
+            (command, mcp_args)
+        }
+    };
+
+    if use_keylogger {
+        let mut wrapper_args = vec![
+            "--name".to_string(),
+            "tilth".to_string(),
+            "--".to_string(),
+            base_cmd,
+        ];
+        wrapper_args.extend(base_args);
+        ("keylogger-mcp-wrapper".to_string(), wrapper_args)
+    } else {
+        (base_cmd, base_args)
     }
 }
 

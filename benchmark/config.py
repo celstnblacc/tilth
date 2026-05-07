@@ -1,3 +1,5 @@
+import os
+import shutil
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional
@@ -19,11 +21,26 @@ RUNNERS = {
     "o3": "codex",
 }
 
-# MCP config arguments for codex (tilth server)
-TILTH_MCP_CODEX_ARGS = [
-    "-c", 'mcp_servers.tilth.command="/Users/flysikring/.cargo/bin/tilth"',
-    "-c", 'mcp_servers.tilth.args=["--mcp", "--edit"]',
-]
+def resolve_tilth_bin() -> str:
+    """Resolve the tilth executable for benchmark runs."""
+    candidate = os.environ.get("TILTH_BIN")
+    if candidate:
+        return candidate
+
+    resolved = shutil.which("tilth")
+    if resolved:
+        return resolved
+
+    return str(Path.home() / ".local" / "bin" / "tilth")
+
+
+def codex_mcp_args() -> list[str]:
+    """MCP args for codex with a portable tilth command path."""
+    tilth_bin = resolve_tilth_bin().replace("\\", "\\\\")
+    return [
+        "-c", f'mcp_servers.tilth.command="{tilth_bin}"',
+        "-c", 'mcp_servers.tilth.args=["--mcp", "--edit"]',
+    ]
 
 
 @dataclass

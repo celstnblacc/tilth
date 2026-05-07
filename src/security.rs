@@ -347,7 +347,7 @@ mod tests {
     }
 
     /// Integration test: verify path validation prevents directory traversal in edit operations.
-    /// Uses validate_path_in_scope directly to avoid racy set_current_dir (process-global).
+    /// Uses `validate_path_in_scope` directly to avoid racy `set_current_dir` (process-global).
     #[test]
     fn test_integration_edit_path_traversal() {
         let scope = setup_test_dir("integration_edit");

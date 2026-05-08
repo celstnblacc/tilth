@@ -35,3 +35,22 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 ### Added
 - MCP-host Stop-hook kill diagnostic: on SIGTERM/SIGHUP within 60s of startup, log a clear warning pointing at `verify-mcp-stop-hook` and the offending `~/.claude/settings.json` `hooks.Stop` entry. Helps detect regressions where the MCP host (e.g. Claude Code) `Stop` hook pkills MCP children every assistant turn.
 - `signal-hook = "0.3"` dependency for SIGTERM/SIGHUP handling.
+
+## [0.7.0] - 2026-05-08
+
+### Removed (BREAKING)
+- `KEYLOGGER_MCP` env var support in `src/install.rs`. `tilth install <host>` no longer wraps tilth's command with `keylogger-mcp-wrapper`. The wrapping responsibility now lives in keylogger-mcp itself (v0.2.0+), where it belongs.
+
+### Migration
+If you previously relied on the default-on wrapping (i.e. you ran `tilth install <host>` with `KEYLOGGER_MCP` unset or `=1` and expected MCP traffic to be logged), the replacement is one command:
+
+    keylogger-mcp wrap <host> tilth
+
+Reverse with:
+
+    keylogger-mcp unwrap <host> tilth
+
+See `keylogger-mcp status` for current state across all hosts.
+
+### Why
+Tilth had no business knowing keylogger existed. The coupling (env-var read in tilth's installer, hardcoded `keylogger-mcp-wrapper` command path) made `tilth install` non-idempotent and silently broken on machines without keylogger on PATH. With v0.7.0 tilth installs only tilth, and users who want logging point keylogger-mcp at the servers they care about.

@@ -28,3 +28,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
   - `cast_lossless`: replace `as f64` with `f64::from()` in `bloom.rs`
   - `doc_markdown`: add backticks around `validate_path_in_scope` and `set_current_dir` in `security.rs`
 - 2026-05-07: feat(install): add keylogger-mcp-wrapper support in tilth_command_and_args() — transparent MCP proxy logging controlled by KEYLOGGER_MCP env var
+- 2026-05-08: detect MCP-host Stop-hook kill regressions — log clear diagnostic on SIGTERM/SIGHUP within 60s of startup (points at `verify-mcp-stop-hook` and ~/.claude/settings.json hooks.Stop)
+
+## [0.6.2] - 2026-05-08
+
+### Added
+- MCP-host Stop-hook kill diagnostic: on SIGTERM/SIGHUP within 60s of startup, log a clear warning pointing at `verify-mcp-stop-hook` and the offending `~/.claude/settings.json` `hooks.Stop` entry. Helps detect regressions where the MCP host (e.g. Claude Code) `Stop` hook pkills MCP children every assistant turn.
+- `signal-hook = "0.3"` dependency for SIGTERM/SIGHUP handling.

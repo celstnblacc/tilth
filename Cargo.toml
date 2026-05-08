@@ -1,6 +1,6 @@
 [package]
 name = "tilth"
-version = "0.6.1"
+version = "0.6.2"
 edition = "2021"
 description = "Tree-sitter indexed lookups — smart code reading for AI agents"
 license = "MIT"
@@ -62,6 +62,9 @@ toml = "0.8"
 
 # MCP protocol (JSON-RPC over stdio)
 # (handled manually — no framework needed)
+
+# Signal handling for MCP-host kill diagnostic
+signal-hook = "0.3"
 
 
 [dev-dependencies]

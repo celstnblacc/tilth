@@ -88,9 +88,56 @@ tilth_edit: Edit files using hash-anchored lines. Replaces the host Edit tool.\n
   After editing a function signature, tilth_edit shows callers that may need updating.\n\
 DO NOT use the host Edit tool. Use tilth_edit for all edits.";
 
+/// External-kill diagnostic.
+///
+/// If tilth's MCP server is killed by SIGTERM/SIGHUP within 60s of startup,
+/// the most likely cause is an MCP host (Claude Code) Stop hook pkilling MCP
+/// children — see `~/.claude/hooks/kill-mcp-children.sh`. The Stop event
+/// fires at the end of every assistant turn, not at session exit, so wiring
+/// such a script there silently kills tilth between turns. Run
+/// `verify-mcp-stop-hook` to detect the regression.
+fn install_external_kill_diagnostic() {
+    use signal_hook::consts::{SIGHUP, SIGTERM};
+    use signal_hook::iterator::Signals;
+    use std::time::Instant;
+
+    let started = Instant::now();
+    let mut signals = match Signals::new([SIGTERM, SIGHUP]) {
+        Ok(s) => s,
+        Err(e) => {
+            eprintln!("tilth: could not install signal handler: {e}");
+            return;
+        }
+    };
+
+    std::thread::spawn(move || {
+        for sig in signals.forever() {
+            let signame = match sig {
+                SIGTERM => "SIGTERM",
+                SIGHUP => "SIGHUP",
+                _ => "signal",
+            };
+            let uptime = started.elapsed().as_secs_f64();
+            eprintln!(
+                "tilth received {signame} after {uptime:.1}s of uptime — exiting"
+            );
+            if uptime < 60.0 {
+                eprintln!(
+                    "Killed within 60s of startup. If this also fires every assistant turn,\n\
+                     your MCP host is killing child processes via a Stop hook. Run\n\
+                     `verify-mcp-stop-hook` to detect a regression in ~/.claude/settings.json.\n\
+                     The `Stop` event fires per-turn, not per-session."
+                );
+            }
+            std::process::exit(0);
+        }
+    });
+}
+
 /// MCP server over stdio. When `edit_mode` is true, exposes `tilth_edit` and
 /// switches `tilth_read` to hashline output format.
 pub fn run(edit_mode: bool) -> io::Result<()> {
+    install_external_kill_diagnostic();
     let cache = Arc::new(OutlineCache::new());
     let session = Arc::new(Session::new());
     let symbol_index = Arc::new(SymbolIndex::new());

@@ -54,3 +54,27 @@ See `keylogger-mcp status` for current state across all hosts.
 
 ### Why
 Tilth had no business knowing keylogger existed. The coupling (env-var read in tilth's installer, hardcoded `keylogger-mcp-wrapper` command path) made `tilth install` non-idempotent and silently broken on machines without keylogger on PATH. With v0.7.0 tilth installs only tilth, and users who want logging point keylogger-mcp at the servers they care about.
+
+## [0.8.0] - 2026-05-08
+
+### Changed (BREAKING — JSON output shape)
+- `tilth doctor` reimplemented as a typed report. The merged design unifies the previous ad-hoc `install::doctor` (host registration walker) with the parked `doctor.rs` redesign (binary/edit-mode/scope checks). One command, six checks: `binary`, `mcp_hosts`, `command_ok`, `trust_level`, `scope`, `edit_mode`.
+- JSON output shape changed from `{tilth_version, healthy, registered_hosts, hosts: {<host>: {...}}}` to `{overall: "pass|warn|fail", checks: [{name, status, detail}, ...]}`. Anyone scripting against the old shape needs to update.
+- New module: `src/doctor.rs`. Public API: `tilth::doctor::run(json)`, `build_report()`, `DoctorReport`, `DoctorCheck`, `CheckStatus`.
+- `pub fn doctor` removed from `src/install.rs`. Trust-level / host-registration helpers (`resolve_host`, `check_registration`, `SUPPORTED_HOSTS`, `HostInfo`, `ConfigFormat`) bumped to `pub(crate)` so the new doctor module can use them.
+- `main.rs` `Command::Doctor` route now calls `tilth::doctor::run(json)`. Exit code 1 on overall=fail.
+- 9 new unit tests in `src/doctor.rs::tests` covering CheckStatus serialization, DoctorCheck JSON shape, overall aggregation rules, and stable JSON schema.
+
+### Migration
+The human-readable text output looks similar but with a different layout. JSON consumers must switch:
+
+```diff
+- jq '.healthy'
++ jq '.overall == "pass"'
+
+- jq '.registered_hosts'
++ jq '[.checks[] | select(.name == "mcp_hosts").detail]'
+```
+
+### Why
+The merged design closes a months-old design gap. Two parallel doctor implementations existed — the shipped `install::doctor` and a 444-line untracked `doctor.rs` — that checked different things. Users got whichever one was wired into the CLI, with no way to discover the other's checks. v0.8.0 unifies them behind one stable typed shape so future checks slot in cleanly.

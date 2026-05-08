@@ -28,7 +28,7 @@ use serde_json::{json, Value};
 //   qwen-code:      ~/.qwen/settings.json                     (user scope)
 //   crush:          ~/.config/crush/crush.json                 (user scope)
 //   pi:             ~/.pi/agent/mcp.json                       (user scope)
-const SUPPORTED_HOSTS: &[&str] = &[
+pub(crate) const SUPPORTED_HOSTS: &[&str] = &[
     "claude-code",
     "cursor",
     "windsurf",
@@ -221,21 +221,21 @@ fn tilth_command_and_args(edit: bool) -> (String, Vec<String>) {
 }
 
 #[derive(Debug)]
-enum ConfigFormat {
+pub(crate) enum ConfigFormat {
     /// JSON with a configurable servers key ("mcpServers" or "servers").
     Json { servers_key: &'static str },
     /// TOML with `[mcp_servers.<name>]` sections.
     Toml,
 }
 
-struct HostInfo {
-    path: PathBuf,
-    format: ConfigFormat,
+pub(crate) struct HostInfo {
+    pub(crate) path: PathBuf,
+    pub(crate) format: ConfigFormat,
     /// Optional note printed after success.
     note: Option<&'static str>,
 }
 
-fn resolve_host(host: &str) -> Result<HostInfo, String> {
+pub(crate) fn resolve_host(host: &str) -> Result<HostInfo, String> {
     let home = home_dir()?;
 
     match host {
@@ -548,26 +548,6 @@ pub enum TrustLevel {
     ReadEdit,
 }
 
-impl TrustLevel {
-    fn as_str(&self) -> &'static str {
-        match self {
-            TrustLevel::ReadOnly => "read_only",
-            TrustLevel::ReadEdit => "read_edit",
-        }
-    }
-}
-
-/// Registration status of tilth in one MCP host.
-pub struct HostStatus {
-    pub host: String,
-    pub config_path: PathBuf,
-    pub config_exists: bool,
-    pub registered: bool,
-    pub command: Option<String>,
-    pub command_ok: Option<bool>,
-    pub trust_level: Option<TrustLevel>,
-}
-
 /// Returns true if `cmd` (bare filename) resolves to an executable on `$PATH`,
 /// or if `cmd` is an absolute/relative path pointing to an existing file.
 fn command_in_path(cmd: &str) -> bool {
@@ -586,7 +566,7 @@ fn command_in_path(cmd: &str) -> bool {
 /// Extract the tilth command and trust level registered in `info`'s config file.
 /// Returns `Some((command_string, command_is_reachable, trust_level))` or `None` when
 /// tilth is not registered (or the config file doesn't exist / is unreadable).
-fn check_registration(info: &HostInfo) -> Option<(String, bool, TrustLevel)> {
+pub(crate) fn check_registration(info: &HostInfo) -> Option<(String, bool, TrustLevel)> {
     if !info.path.exists() {
         return None;
     }
@@ -637,132 +617,7 @@ fn check_registration(info: &HostInfo) -> Option<(String, bool, TrustLevel)> {
     }
 }
 
-/// Run `tilth doctor [--json]`.
-///
-/// Iterates all supported hosts, checks whether tilth is registered in each
-/// config file that exists, and reports health status.
-pub fn doctor(json: bool) {
-    let tilth_version = env!("CARGO_PKG_VERSION");
-
-    let mut statuses: Vec<HostStatus> = Vec::new();
-    let mut registered_count = 0usize;
-
-    for &host in SUPPORTED_HOSTS {
-        let Ok(info) = resolve_host(host) else {
-            continue;
-        };
-
-        let config_exists = info.path.exists();
-        let (registered, command, command_ok, trust_level) = if config_exists {
-            match check_registration(&info) {
-                Some((cmd, ok, trust)) => (true, Some(cmd), Some(ok), Some(trust)),
-                None => (false, None, None, None),
-            }
-        } else {
-            (false, None, None, None)
-        };
-
-        if registered {
-            registered_count += 1;
-        }
-
-        statuses.push(HostStatus {
-            host: host.to_string(),
-            config_path: info.path,
-            config_exists,
-            registered,
-            command,
-            command_ok,
-            trust_level,
-        });
-    }
-
-    let healthy = registered_count > 0;
-
-    if json {
-        // Only include hosts where a config file exists.
-        let hosts_map: serde_json::Map<String, Value> = statuses
-            .iter()
-            .filter(|s| s.config_exists)
-            .map(|s| {
-                let mut obj = serde_json::Map::new();
-                obj.insert("registered".into(), json!(s.registered));
-                obj.insert(
-                    "config_path".into(),
-                    json!(s.config_path.to_string_lossy()),
-                );
-                if let Some(cmd) = &s.command {
-                    obj.insert("command".into(), json!(cmd));
-                }
-                if let Some(ok) = s.command_ok {
-                    obj.insert("command_ok".into(), json!(ok));
-                }
-                if let Some(trust) = &s.trust_level {
-                    obj.insert("trust_level".into(), json!(trust.as_str()));
-                }
-                (s.host.clone(), Value::Object(obj))
-            })
-            .collect();
-
-        let registered_hosts: Vec<String> = statuses
-            .iter()
-            .filter(|s| s.registered)
-            .map(|s| s.host.clone())
-            .collect();
-
-        let output = json!({
-            "tilth_version": tilth_version,
-            "healthy": healthy,
-            "registered_hosts": registered_hosts,
-            "hosts": hosts_map,
-        });
-        println!(
-            "{}",
-            serde_json::to_string_pretty(&output).expect("doctor output is always serializable")
-        );
-    } else {
-        println!("tilth doctor  v{tilth_version}");
-        println!();
-        let mut any_shown = false;
-        for s in &statuses {
-            if !s.config_exists {
-                continue;
-            }
-            any_shown = true;
-            let status_str = if s.registered {
-                let trust_str = match &s.trust_level {
-                    Some(TrustLevel::ReadEdit) => "  [read+edit]",
-                    _ => "  [read-only]",
-                };
-                match s.command_ok {
-                    Some(false) => format!(
-                        "✓ registered{trust_str}  ✗ command missing: {}",
-                        s.command.as_deref().unwrap_or("?")
-                    ),
-                    _ => format!("✓ registered{trust_str}"),
-                }
-            } else {
-                "✗ config exists — tilth not registered".to_string()
-            };
-            println!("  {:<20} {status_str}", s.host);
-            if s.registered {
-                if let Some(cmd) = &s.command {
-                    println!("    command: {cmd}");
-                }
-            }
-        }
-        if !any_shown {
-            println!("  (no host config files found)");
-        }
-        println!();
-        if healthy {
-            println!("✓ healthy — tilth registered in {registered_count} host(s)");
-        } else {
-            println!("✗ not healthy — tilth not registered in any host");
-            println!("  run: tilth install <host>");
-        }
-    }
-}
+// `pub fn doctor` removed in v0.8.0 — see src/doctor.rs for the merged implementation.
 
 #[cfg(test)]
 mod tests {
@@ -1270,12 +1125,6 @@ mod tests {
         let info = HostInfo { path, format: ConfigFormat::Toml, note: None };
         let (_, _, trust) = check_registration(&info).unwrap();
         assert_eq!(trust, TrustLevel::ReadEdit);
-    }
-
-    #[test]
-    fn trust_level_as_str() {
-        assert_eq!(TrustLevel::ReadOnly.as_str(), "read_only");
-        assert_eq!(TrustLevel::ReadEdit.as_str(), "read_edit");
     }
 
     #[test]

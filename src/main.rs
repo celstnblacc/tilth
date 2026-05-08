@@ -106,7 +106,9 @@ fn main() {
                 }
             }
             Command::Doctor { json } => {
-                tilth::install::doctor(json);
+                if tilth::doctor::run(json).is_err() {
+                    process::exit(1);
+                }
             }
         }
         return;

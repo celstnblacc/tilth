@@ -29,6 +29,10 @@ pub(in crate::mcp) fn tool_read(
             "unknown read mode: {mode_str}. Use: auto, full, signature, stripped"
         ));
     }
+    // Precedence when full:true is combined with a reshaping mode: signature and
+    // stripped win over full. The dispatch below checks force_signature/force_stripped
+    // before falling back to force_full, so `full:true` + `mode:signature` yields a
+    // signature view, not a full dump. Pinned by tool_read_signature_beats_full_flag.
     let force_full = full_flag || mode_str == "full";
     let force_signature = mode_str == "signature";
     let force_stripped = mode_str == "stripped";
@@ -96,6 +100,15 @@ pub(in crate::mcp) fn tool_read(
         return Err("provide either section (single) or sections (array), not both".into());
     }
 
+    // signature/stripped reshape the whole file; a section selection has no
+    // meaning there. Error rather than silently dropping the mode.
+    if (force_signature || force_stripped) && (section.is_some() || sections_arr.is_some()) {
+        return Err(format!(
+            "mode={mode_str} cannot be combined with section/sections — \
+             {mode_str} reshapes the whole file. Drop section/sections or pick mode=auto/full."
+        ));
+    }
+
     // Multi-section path: bypass smart view + related-file hints (those only
     // apply to whole-file reads).
     if let Some(arr) = sections_arr {
@@ -154,6 +167,10 @@ pub(in crate::mcp) fn tool_read(
     Ok(apply_budget(output, budget))
 }
 
+// `cache` is intentionally unwired on the tree-sitter path: OutlineCache stores
+// formatted outline strings, not Vec<OutlineEntry>, so get_outline_entries below
+// re-parses every call. Wiring a structured cache is a separate change. The param
+// is still used by the non-code fallback (read_file), so it keeps its real name.
 fn read_signature_file(path: &Path, cache: &OutlineCache) -> Result<(String, u32), TilthError> {
     let content = std::fs::read_to_string(path).map_err(|e| match e.kind() {
         std::io::ErrorKind::NotFound => TilthError::NotFound {
@@ -173,13 +190,15 @@ fn read_signature_file(path: &Path, cache: &OutlineCache) -> Result<(String, u32
         source: e,
     })?;
     let line_count = u32::try_from(content.lines().count()).unwrap_or(u32::MAX);
-    let header = crate::format::file_header(path, meta.len(), line_count, ViewMode::Signature);
 
     let FileType::Code(lang) = detect_file_type(path) else {
         let body = crate::read::read_file(path, None, false, cache, false)?;
         return Ok((body, line_count));
     };
 
+    // Build the signature header only on the code path — the non-code fallback
+    // above returns the normal read and never uses it.
+    let header = crate::format::file_header(path, meta.len(), line_count, ViewMode::Signature);
     let entries = get_outline_entries(&content, lang);
     let lines: Vec<&str> = content.lines().collect();
     let mut body = String::new();
@@ -201,6 +220,10 @@ fn render_signature_entries(entries: &[OutlineEntry], lines: &[&str], out: &mut 
     }
 }
 
+// `cache` is intentionally unwired on the tree-sitter path: OutlineCache stores
+// formatted outline strings, not Vec<OutlineEntry>, so strip_noise re-parses every
+// call. Wiring a structured cache is a separate change. The param is still used by
+// the non-code fallback (read_file), so it keeps its real name.
 fn read_stripped_file(path: &Path, cache: &OutlineCache) -> Result<(String, u32, u32), TilthError> {
     let content = std::fs::read_to_string(path).map_err(|e| match e.kind() {
         std::io::ErrorKind::NotFound => TilthError::NotFound {
@@ -438,6 +461,60 @@ mod tests {
         assert_ne!(
             via_auto, via_flag,
             "auto must outline a large file, differing from forced full"
+        );
+    }
+
+    #[test]
+    fn tool_read_signature_beats_full_flag() {
+        // full:true + mode:signature must resolve to a signature view, not a full
+        // dump. If a future change flips the dispatch order this test fails loudly.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("precedence.rs");
+        std::fs::write(
+            &path,
+            "fn precedence_target() {\n    let body_marker = 99;\n}\n",
+        )
+        .unwrap();
+        let args = serde_json::json!({
+            "path": path.to_str().unwrap(),
+            "mode": "signature",
+            "full": true,
+        });
+        let cache = OutlineCache::new();
+        let session = Session::new();
+
+        let out = tool_read(&args, &cache, &session, false).expect("signature+full read");
+
+        assert!(
+            out.contains("[signature]"),
+            "signature must win over full:true (header): {out}"
+        );
+        assert!(
+            !out.contains("body_marker"),
+            "signature must win over full:true (body omitted): {out}"
+        );
+    }
+
+    #[test]
+    fn tool_read_signature_mode_rejects_section() {
+        // Combining a reshaping mode with section must error, not silently drop the
+        // mode (which would return a section slice and ignore signature entirely).
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("conflict.rs");
+        std::fs::write(&path, "fn a() {}\nfn b() {}\n").unwrap();
+        let args = serde_json::json!({
+            "path": path.to_str().unwrap(),
+            "mode": "signature",
+            "section": "1-1",
+        });
+        let cache = OutlineCache::new();
+        let session = Session::new();
+
+        let err =
+            tool_read(&args, &cache, &session, false).expect_err("signature + section must error");
+        assert!(
+            err.contains("signature") && err.contains("section"),
+            "error must name the conflict: {err}"
         );
     }
 

@@ -1,5 +1,7 @@
 tilth — code intelligence MCP server. Replaces grep, cat, find, ls with AST-aware equivalents.
 
+PATHS: pass an ABSOLUTE path/scope, or set `root` to your ABSOLUTE checkout directory. DO NOT pass a relative path/scope without an absolute `root` — the server's cwd is frozen at startup and is NOT your shell's cwd, so a relative path is refused. A relative `root` is also refused.
+
 To explore code, always search first. tilth_search finds definitions, usages, and file locations in one call.
 Usage: tilth_search(query: "handleRequest").
 tilth_files is ONLY for listing directory contents when you have no symbol or text to search for.
@@ -12,6 +14,7 @@ kind: "symbol" (default) | "content" (strings/comments) | "callers" (call sites)
 expand (default 2): inline full source for top matches.
 context: path to file being edited — boosts nearby results.
 glob: file pattern filter — "*.rs" (whitelist), "!*.test.ts" (exclude).
+root: absolute checkout dir. Required if `scope` is relative (or omitted); absolute `scope` needs no root. The server cannot see your shell cwd.
 Output per match:
 ## <path>:<start>-<end> [definition|usage|impl]
 <outline context>
@@ -27,20 +30,24 @@ Small files → full content. Large files → structural outline.
 section: "<start>-<end>" or "<heading text>"
 sections: array of ranges/headings — multiple slices from the same file in one call.
 paths: read multiple files in one call.
+root: absolute checkout dir. Required if any path in `paths` is relative; absolute paths need no root and are used as-is. The server cannot see your shell cwd.
 Output:
 <line_number> │ <content>                  ← full/section mode
 [<start>-<end>]  <symbol name>             ← outline mode
 
 tilth_files: Find files by glob pattern. Replaces find, ls, pwd, and the host Glob tool.
 patterns: run multiple globs in one call (e.g. patterns: ["*.rs", "*.toml"]).
+root: absolute checkout dir. Required if `scope` is relative (or omitted); absolute `scope` needs no root. The server cannot see your shell cwd.
 Output: <path>  (~<token_count> tokens).
 
 tilth_deps: Blast-radius check — what imports this file and what it imports.
 Use ONLY before renaming, removing, or changing an export's signature.
+root: absolute checkout dir. Required if `path`/`scope` are relative; absolute ones need no root. The server cannot see your shell cwd.
 
 tilth_grok: Everything structural about a symbol in one call — def + body + signature + doc + callees + callers + siblings + tests.
 Usage: tilth_grok(target: "parse_unified_diff"). Also accepts "src/file.rs:7" or "Type::method".
 scope: narrow when the name is ambiguous. full: widen caps from 5/5/8/8 to 50/30/30/30.
+root: absolute checkout dir. Required if `scope` is relative (or omitted); absolute `scope` needs no root. The server cannot see your shell cwd.
 Use ONLY for "understand this symbol" questions — replaces the search → expand → callers chain.
 DO NOT use for concept search (use tilth_search) or reading file contents (use tilth_read).
 

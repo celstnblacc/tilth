@@ -92,7 +92,7 @@ mod tests {
     }
 
     #[test]
-    fn apply_with_info_single_long_line_body_does_not_collapse() {
+    fn single_long_line_body_does_not_collapse() {
         // Regression: a body that is one very long line with no interior \n has no
         // `\n\n` to land on, so rfind('\n') finds only the leading separator at
         // offset 0. Without the `filter(|&p| p > 0)` guard on that arm, cut_point
@@ -100,20 +100,15 @@ mod tests {
         // `header\n\n... truncated` with zero content.
         let long_line = "x".repeat(10_000);
         let input = format!("# header\n{long_line}");
-        let (out, info) = apply_with_info(&input, 400);
-        let info = info.expect("must truncate: body is 10k+ chars");
-        // Must have cut somewhere, but NOT at position 0.
-        assert!(
-            info.at_line >= 2,
-            "cut landed at line {}, expected >= 2 (body should not be empty)",
-            info.at_line
-        );
+        let out = apply(&input, 400);
+        // The truncation marker must appear (body is 10k+ chars).
+        assert!(out.contains("truncated"), "marker line missing: {out:.80?}");
         // The body content must survive — the output must contain some 'x' chars.
+        // If cut_point landed at 0, clean_body would be empty and no 'x' survives.
         assert!(
             out.contains('x'),
             "body content collapsed to empty — single-long-line truncation bug: {out:.80?}"
         );
-        assert!(out.contains("truncated"), "marker line missing: {out:.80?}");
     }
 
     #[test]

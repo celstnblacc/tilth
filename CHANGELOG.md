@@ -78,3 +78,5 @@ The human-readable text output looks similar but with a different layout. JSON c
 
 ### Why
 The merged design closes a months-old design gap. Two parallel doctor implementations existed — the shipped `install::doctor` and a 444-line untracked `doctor.rs` — that checked different things. Users got whichever one was wired into the CLI, with no way to discover the other's checks. v0.8.0 unifies them behind one stable typed shape so future checks slot in cleanly.
+
+- 2026-06-25: chore: remove personal workspace path from tracked files

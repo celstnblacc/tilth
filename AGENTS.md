@@ -50,3 +50,7 @@ Large files: tilth_read shows outline — use section to get hashlined content.
 Pass diff: true to see a compact before/after diff in the response.
 After editing a function signature, tilth_edit shows callers that may need updating.
 DO NOT use the host Edit tool. Use tilth_edit for all edits.
+
+## Strict Installation Decoupling
+
+Once installed (e.g., to ~/.local/bin), the project binary must NEVER depend on the local repository path for execution, configuration, or data. All paths must be relative to the installation root or use standard system config paths (~/.config).

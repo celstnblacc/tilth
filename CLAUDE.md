@@ -2,6 +2,18 @@
 
 Rust MCP server + CLI for AST-aware code intelligence. Tree-sitter outlines, symbol search, callers/callees, file-level deps analysis. Replaces grep/cat/find for AI agents with structured, token-efficient output.
 
+## Fork Context
+
+This is a **private fork** of [jahala/tilth](https://github.com/jahala/tilth), maintained at [celstnblacc/tilth](https://github.com/celstnblacc/tilth) as part of the token-diet stack.
+
+Security fixes applied (v0.5.7+):
+- **P-1 (HIGH):** Path traversal in MCP tool calls — `security::validate_path_mcp()` added at all three MCP entry points.
+- **P-2 (MEDIUM):** Command injection via `$PAGER` — `security::validate_pager()` with safe allow-list added.
+
+New module: `src/security.rs` (13 tests). Always run `cargo test --all` after any changes to MCP tool handlers or output emission.
+
+Current version: see `Cargo.toml` and `npm/package.json` (both must be bumped together).
+
 ## Project structure
 
 ```
@@ -41,6 +53,8 @@ src/
   cache.rs             OutlineCache — DashMap of path → (mtime, outline). Shared across tools.
   session.rs           MCP session state — tracks previously expanded definitions for dedup.
   edit.rs              Hash-anchored editing (tilth_edit). Hashline verification + atomic apply.
+  security.rs          Path traversal + pager injection guards (validate_path_mcp, validate_pager). 13 tests.
+  doctor.rs            Self-diagnostic tool (tilth doctor).
   install.rs           `tilth install <host>` — writes MCP config for 6 hosts.
   format.rs            Output formatting helpers.
   budget.rs            Token budget enforcement.
@@ -126,3 +140,7 @@ Changes to MCP instructions must be surgical — no bloat. Haiku is sensitive to
 - Concrete examples (tool call patterns, not abstract descriptions)
 
 Test instruction changes with haiku benchmarks on hard tasks (`rg_search_dispatch`, `rg_trait_implementors`, `gin_servehttp_flow`).
+
+## Strict Installation Decoupling
+
+Once installed (e.g., to ~/.local/bin), the project binary must NEVER depend on the local repository path for execution, configuration, or data. All paths must be relative to the installation root or use standard system config paths (~/.config).

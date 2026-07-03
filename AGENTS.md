@@ -1,7 +1,7 @@
 <!-- generated from prompts/mcp-base.md + prompts/mcp-edit.md by scripts/regen-agents-md.sh — do not edit directly -->
 tilth — code intelligence MCP server. Replaces grep, cat, find, ls with AST-aware equivalents.
 
-PATHS: pass an ABSOLUTE path/scope, or set `root` to your ABSOLUTE checkout directory. DO NOT pass a relative path/scope without an absolute `root` — the server's cwd is frozen at startup and is NOT your shell's cwd, so a relative path is refused. A relative `root` is also refused.
+PATHS: DO NOT pass a relative path or scope without also setting root (absolute) — the server cannot see your shell cwd, so bare relative paths are refused. Absolute paths always work; omitting path/scope searches the project the server was launched in.
 
 To explore code, always search first. tilth_search finds definitions, usages, and file locations in one call.
 Usage: tilth_search(query: "handleRequest").

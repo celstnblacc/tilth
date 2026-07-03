@@ -178,7 +178,11 @@ def print_detailed_runs(runs: List[Dict], title: str, limit: int = 5):
 
 def main():
     """Main analysis function."""
-    results_dir = Path("/Users/flysikring/conductor/workspaces/tilth/almaty/benchmark/results")
+    # Override with TILTH_BENCH_RESULTS_DIR env var. Default: benchmark/results
+    # relative to this file, so the script works from any clone.
+    results_dir = Path(
+        os.environ.get("TILTH_BENCH_RESULTS_DIR", str(Path(__file__).parent / "results"))
+    )
 
     # Focus on the two newest files
     target_files = [

@@ -58,7 +58,7 @@ pub(in crate::mcp) fn tool_definitions(edit_mode: bool) -> Vec<Value> {
                     },
                     "root": {
                         "type": "string",
-                        "description": "Absolute path to your checkout directory. REQUIRED unless `scope` is absolute. Must be an absolute path. A RELATIVE `scope` is anchored under `root`; an absolute `scope` is used as-is. The server cannot see your shell cwd, so a relative `scope` with no absolute `root` is refused."
+                        "description": "Absolute project root; anchors relative paths and scopes. Required with any relative path/scope."
                     }
                 }
             }
@@ -104,7 +104,7 @@ pub(in crate::mcp) fn tool_definitions(edit_mode: bool) -> Vec<Value> {
                     },
                     "root": {
                         "type": "string",
-                        "description": "Absolute path to your checkout directory. REQUIRED unless every path in `paths` is absolute. Must be an absolute path. Every RELATIVE file path is anchored under `root`; absolute paths are used as-is. The server cannot see your shell cwd, so a relative path with no absolute `root` is refused."
+                        "description": "Absolute project root; anchors relative paths and scopes. Required with any relative path/scope."
                     }
                 }
             }
@@ -134,7 +134,7 @@ pub(in crate::mcp) fn tool_definitions(edit_mode: bool) -> Vec<Value> {
                     },
                     "root": {
                         "type": "string",
-                        "description": "Absolute path to your checkout directory. REQUIRED unless `scope` is absolute. Must be an absolute path. A RELATIVE `scope` is anchored under `root`; an absolute `scope` is used as-is. The server cannot see your shell cwd, so a relative `scope` with no absolute `root` is refused."
+                        "description": "Absolute project root; anchors relative paths and scopes. Required with any relative path/scope."
                     }
                 }
             }
@@ -160,7 +160,7 @@ pub(in crate::mcp) fn tool_definitions(edit_mode: bool) -> Vec<Value> {
                     },
                     "root": {
                         "type": "string",
-                        "description": "Absolute path to your checkout directory. REQUIRED unless `path` and `scope` are absolute. Must be an absolute path. RELATIVE `path`/`scope` are anchored under `root`; absolute ones are used as-is. The server cannot see your shell cwd, so a relative `path`/`scope` with no absolute `root` is refused."
+                        "description": "Absolute project root; anchors relative paths and scopes. Required with any relative path/scope."
                     }
                 }
             }
@@ -187,7 +187,7 @@ pub(in crate::mcp) fn tool_definitions(edit_mode: bool) -> Vec<Value> {
                     },
                     "root": {
                         "type": "string",
-                        "description": "Absolute path to your checkout directory. REQUIRED unless `scope` is absolute. Must be an absolute path. A RELATIVE `scope` is anchored under `root`; an absolute `scope` is used as-is. The server cannot see your shell cwd, so a relative `scope` with no absolute `root` is refused."
+                        "description": "Absolute project root; anchors relative paths and scopes. Required with any relative path/scope."
                     }
                 }
             }

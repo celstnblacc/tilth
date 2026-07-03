@@ -118,15 +118,32 @@ mod tests {
     }
 
     #[test]
-    fn no_scope_no_root_errors() {
-        // WHY: tilth_files defaults `scope` to "." — relative. Before this spec it
-        // silently walked the server's frozen cwd (the worktree bug). The `?` on
-        // resolve_scope must propagate the refusal out of tool_files, not swallow it.
+    fn no_scope_no_root_defaults_to_cwd() {
+        // WHY: the require-root discipline fires ONLY when a caller EXPLICITLY
+        // passes a relative scope without an absolute root. A bare
+        // `tilth_files(patterns)` call with no scope is the default flow of
+        // every session and must keep working exactly as it does on main —
+        // not refuse. This inverts the PR's original (too strict) assertion.
         let args = serde_json::json!({ "patterns": ["*.rs"] });
-        let err = tool_files(&args).expect_err("bare files must refuse without a root");
+        let out = tool_files(&args).expect("bare files call must default to cwd, not refuse");
+        // Doesn't assert on file contents (cwd varies by test runner), just that
+        // the call succeeds and doesn't route through the require-root refusal.
+        assert!(
+            !out.contains("cannot be resolved"),
+            "unexpected refusal: {out}"
+        );
+    }
+
+    #[test]
+    fn explicit_relative_scope_no_root_errors() {
+        // An EXPLICITLY passed relative scope with no absolute root to anchor it
+        // is unresolvable (the server cannot see the caller's shell cwd) — this
+        // must still refuse.
+        let args = serde_json::json!({ "patterns": ["*.rs"], "scope": "some/relative/dir" });
+        let err = tool_files(&args).expect_err("explicit relative scope must refuse without root");
         assert!(
             err.contains("relative scope") && err.contains("root"),
-            "bare files must refuse without a root: {err}"
+            "explicit relative scope without root must refuse: {err}"
         );
     }
 

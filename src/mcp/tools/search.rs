@@ -106,19 +106,42 @@ pub(in crate::mcp) fn tool_search(
 mod tests {
     use super::*;
 
-    /// WHY: a bare `tilth_search` defaults `scope` to "." and silently searched
-    /// the server's frozen cwd — the worktree bug. No scope + no root must now
-    /// refuse with an actionable message naming the root option.
+    /// WHY: the require-root discipline fires ONLY when a caller EXPLICITLY
+    /// passes a relative scope/path without an absolute root. A bare
+    /// `tilth_search(query)` call with no scope is the default flow of every
+    /// session and must keep working exactly as it does on main — refusing
+    /// here would break every session's default search. This inverts the PR's
+    /// original (too strict) assertion.
     #[test]
-    fn no_scope_no_root_errors() {
+    fn no_scope_no_root_defaults_to_cwd() {
         let cache = OutlineCache::new();
         let session = Session::new();
         let bloom = Arc::new(BloomFilterCache::new());
-        let args = serde_json::json!({ "query": "anything" });
+        let args = serde_json::json!({ "query": "anything_unlikely_to_match_zzz" });
+        let result = tool_search(&args, &cache, &session, &bloom);
+        assert!(
+            result.is_ok(),
+            "bare search must default to cwd, not refuse: {result:?}"
+        );
+        assert!(
+            !result.unwrap().contains("cannot be resolved"),
+            "unexpected refusal routed through require-root discipline"
+        );
+    }
+
+    /// An EXPLICITLY passed relative scope with no absolute root to anchor it
+    /// is unresolvable (the server cannot see the caller's shell cwd) — this
+    /// must still refuse.
+    #[test]
+    fn explicit_relative_scope_no_root_errors() {
+        let cache = OutlineCache::new();
+        let session = Session::new();
+        let bloom = Arc::new(BloomFilterCache::new());
+        let args = serde_json::json!({ "query": "anything", "scope": "some/relative/dir" });
         let err = tool_search(&args, &cache, &session, &bloom).unwrap_err();
         assert!(
             err.contains("relative scope") && err.contains("root"),
-            "bare search must refuse without a root: {err}"
+            "explicit relative scope without root must refuse: {err}"
         );
     }
 }

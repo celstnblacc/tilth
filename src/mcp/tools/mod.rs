@@ -61,20 +61,50 @@ fn anchor_path(
 }
 
 /// Resolve the `scope` arg under the absolute-path discipline (`anchor_path`).
-/// An omitted scope defaults to `"."`, which is relative — so a bare repo-wide
-/// search now requires an absolute `root` (or an absolute `scope`). When the
-/// anchored path does not resolve to an existing directory:
 ///
+/// The require-root discipline fires ONLY when a caller EXPLICITLY passes a
+/// relative `scope` without an absolute `root` — that is a deliberate but
+/// unresolvable request, since the server cannot see the caller's shell cwd.
+///
+/// When `scope` is **absent entirely**, this falls back to today's default
+/// behavior (server launch cwd, exactly as on `main`): no refusal, no `root`
+/// requirement. A bare repo-wide search (no `scope`, no `root`) must keep
+/// working — that is the default flow of every session.
+///
+/// When the anchored path does not resolve to an existing directory:
 /// - If an absolute `root` is available, fall back to `root` with a soft warning
 ///   (the caller's checkout exists; the scope subdir simply does not).
 /// - If no absolute `root` is available, return `Err` — there is no safe anchor
 ///   to fall back to, and silently searching the server cwd is the worktree hazard.
+///   (This branch is unreachable for an absent `scope`, since `"."` always
+///   resolves to an existing directory — the server cwd.)
 pub(super) fn resolve_scope(
     args: &Value,
     root: Option<&std::path::Path>,
 ) -> Result<(PathBuf, Option<String>), String> {
-    let raw_str = args.get("scope").and_then(|v| v.as_str()).unwrap_or(".");
+    let scope_arg = args.get("scope").and_then(|v| v.as_str());
+    let raw_str = scope_arg.unwrap_or(".");
     let raw: PathBuf = raw_str.into();
+
+    // No explicit scope: behave exactly like main's default-cwd flow. Do not
+    // apply the require-root discipline to a value the caller never passed.
+    if scope_arg.is_none() {
+        let resolved = raw.canonicalize().unwrap_or(raw);
+        let cwd = std::env::current_dir().unwrap_or_else(|_| ".".into());
+        if resolved == cwd {
+            return Ok((".".into(), None));
+        }
+        if !resolved.is_dir() {
+            return Ok((
+                ".".into(),
+                Some(format!(
+                    "scope \"{raw_str}\" is not a valid directory, searching current directory instead.\n\n"
+                )),
+            ));
+        }
+        return Ok((resolved, None));
+    }
+
     let anchored = anchor_path(&raw, root, "scope")?;
     let resolved = anchored.canonicalize().unwrap_or(anchored);
     if !resolved.is_dir() {
@@ -130,16 +160,28 @@ mod tests {
     }
 
     #[test]
-    fn resolve_scope_no_arg_no_root_errors() {
-        // WHY: an omitted scope defaults to "." — relative. The server's cwd is
-        // frozen at spawn, so silently anchoring "." to it is the worktree bug.
-        // A bare repo-wide search must now demand an absolute `root`.
+    fn resolve_scope_no_arg_no_root_defaults_to_cwd() {
+        // WHY: the require-root discipline fires ONLY when a caller EXPLICITLY
+        // passes a relative scope/path without an absolute root. An omitted
+        // `scope` must keep today's default behavior (server launch cwd, exactly
+        // as on main) — refusing here would break the default flow of every
+        // session (e.g. a bare tilth_search/tilth_files call with no scope).
         let args = serde_json::json!({});
-        let err = resolve_scope(&args, None).unwrap_err();
-        assert!(
-            err.contains("relative scope") && err.contains("root"),
-            "omitted scope + no root must error and name root: {err}"
-        );
+        let (scope, warning) = resolve_scope(&args, None).unwrap();
+        assert_eq!(scope, PathBuf::from("."));
+        assert!(warning.is_none());
+    }
+
+    #[test]
+    fn resolve_scope_no_arg_ignores_root() {
+        // An omitted scope must default to cwd even when `root` IS supplied —
+        // `root` only matters when the caller explicitly passes something
+        // relative to anchor.
+        let args = serde_json::json!({});
+        let tmp = tempfile::tempdir().unwrap();
+        let (scope, warning) = resolve_scope(&args, Some(tmp.path())).unwrap();
+        assert_eq!(scope, PathBuf::from("."));
+        assert!(warning.is_none());
     }
 
     #[test]

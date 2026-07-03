@@ -4,6 +4,7 @@ Compare old tilth (built-in tools) vs new tilth (MCP-only) exploration patterns.
 """
 
 import json
+import os
 from pathlib import Path
 from typing import Dict, List
 
@@ -18,7 +19,11 @@ def parse_jsonl(file_path: str) -> List[Dict]:
     return results
 
 def main():
-    results_dir = Path("/Users/flysikring/conductor/workspaces/tilth/almaty/benchmark/results")
+    # Override with TILTH_BENCH_RESULTS_DIR env var. Default: benchmark/results
+    # relative to this file, so the script works from any clone.
+    results_dir = Path(
+        os.environ.get("TILTH_BENCH_RESULTS_DIR", str(Path(__file__).parent / "results"))
+    )
 
     old_file = results_dir / "benchmark_20260213_131246.jsonl"
     new_file = results_dir / "benchmark_20260213_135039.jsonl"

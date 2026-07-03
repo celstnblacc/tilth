@@ -78,6 +78,33 @@ const EXPAND_FULL_FILE_THRESHOLD: u64 = 800;
 /// section)" so the user knows to expand for the rest.
 const MARKDOWN_PREVIEW_MAX_LINES: usize = 40;
 
+/// Shared walker policy: searches ALL files except known junk directories.
+/// Does NOT respect .gitignore — ensures gitignored but locally-relevant files
+/// are found. Used by both the parallel search walker (`walker()`) and the
+/// sequential map walker (`crate::map::generate`), which each apply their own
+/// final `.max_depth()`/`.threads()` and `.build()`/`.build_parallel()`.
+pub(crate) fn base_walk_builder(scope: &Path) -> WalkBuilder {
+    let mut builder = WalkBuilder::new(scope);
+    builder
+        .follow_links(true)
+        .same_file_system(true) // Stop at mount boundaries (NFS, external volumes).
+        .hidden(false)
+        .git_ignore(false)
+        .git_global(false)
+        .git_exclude(false)
+        .ignore(false)
+        .parents(false)
+        .filter_entry(|entry| {
+            if entry.file_type().is_some_and(|ft| ft.is_dir()) {
+                if let Some(name) = entry.file_name().to_str() {
+                    return !SKIP_DIRS.contains(&name);
+                }
+            }
+            true
+        });
+    builder
+}
+
 /// Build a parallel directory walker that searches ALL files except known junk directories.
 /// Does NOT respect .gitignore — ensures gitignored but locally-relevant files are found.
 /// When `glob` is Some, applies a file-pattern override (whitelist or negation).
@@ -89,25 +116,8 @@ pub(crate) fn walker(scope: &Path, glob: Option<&str>) -> Result<ignore::WalkPar
             std::thread::available_parallelism().map_or(4, |n| (n.get() / 2).clamp(2, 6))
         });
 
-    let mut builder = WalkBuilder::new(scope);
-    builder
-        .follow_links(true)
-        .same_file_system(true) // Stop at mount boundaries (NFS, external volumes).
-        .hidden(false)
-        .git_ignore(false)
-        .git_global(false)
-        .git_exclude(false)
-        .ignore(false)
-        .parents(false)
-        .threads(threads)
-        .filter_entry(|entry| {
-            if entry.file_type().is_some_and(|ft| ft.is_dir()) {
-                if let Some(name) = entry.file_name().to_str() {
-                    return !SKIP_DIRS.contains(&name);
-                }
-            }
-            true
-        });
+    let mut builder = base_walk_builder(scope);
+    builder.threads(threads);
 
     if let Some(pattern) = glob {
         if !pattern.is_empty() {
@@ -629,27 +639,37 @@ fn format_single_match(
         }
     }
 
+    // Check session dedup for definitions with def_range. The mtime
+    // check ensures a post-edit search re-inlines the body rather than
+    // pointing at stale line numbers.
+    let current_mtime = std::fs::metadata(&m.path)
+        .ok()
+        .and_then(|md| md.modified().ok());
+    let deduped = m.is_definition
+        && m.def_range.is_some()
+        && session
+            .is_some_and(|s| current_mtime.is_some_and(|t| s.is_expanded(&m.path, m.line, t)));
+    // expand_match always prints a range containing m.line (def_range starts
+    // at m.line for definitions; the ±10 fallback for def_range: None / usages
+    // trivially contains it), so the raw "-> [line] text" preview would
+    // reprint m.text byte-for-byte inside the fence below. Only the
+    // structural outline_context (neighboring entries' signatures, not the
+    // matched line's own source) survives alongside an expansion.
+    let fence_will_follow =
+        *expand_remaining > 0 && !deduped && !(multi_file && expanded_files.contains(&m.path));
+
     // Skip outline for small files — the expanded code speaks for itself
     if m.file_lines < 50 {
-        let _ = write!(out, "\n→ [{}]   {}", m.line, m.text);
+        if !fence_will_follow {
+            let _ = write!(out, "\n-> [{}]   {}", m.line, m.text);
+        }
     } else if let Some(context) = outline_context_for_match(&m.path, m.line, cache) {
         out.push_str(&context);
-    } else {
-        let _ = write!(out, "\n→ [{}]   {}", m.line, m.text);
+    } else if !fence_will_follow {
+        let _ = write!(out, "\n-> [{}]   {}", m.line, m.text);
     }
 
     if *expand_remaining > 0 {
-        // Check session dedup for definitions with def_range. The mtime
-        // check ensures a post-edit search re-inlines the body rather than
-        // pointing at stale line numbers.
-        let current_mtime = std::fs::metadata(&m.path)
-            .ok()
-            .and_then(|md| md.modified().ok());
-        let deduped = m.is_definition
-            && m.def_range.is_some()
-            && session
-                .is_some_and(|s| current_mtime.is_some_and(|t| s.is_expanded(&m.path, m.line, t)));
-
         if deduped {
             if let Some((start, end)) = m.def_range {
                 let _ = write!(
@@ -760,7 +780,7 @@ fn format_single_match(
                                 }
 
                                 if !nodes.is_empty() {
-                                    out.push_str("\n\n\u{2500}\u{2500} calls \u{2500}\u{2500}");
+                                    out.push_str("\n\n-- calls --");
                                     for n in &nodes {
                                         let c = &n.callee;
                                         let _ = write!(
@@ -777,7 +797,7 @@ fn format_single_match(
                                         for child in &n.children {
                                             let _ = write!(
                                                 out,
-                                                "\n    \u{2192} {}  {}:{}-{}",
+                                                "\n    -> {}  {}:{}-{}",
                                                 child.name,
                                                 rel(&child.file, scope),
                                                 child.start_line,
@@ -810,9 +830,7 @@ fn format_single_match(
                                         let resolved =
                                             siblings::resolve_siblings(&filtered, &parent.children);
                                         if !resolved.is_empty() {
-                                            out.push_str(
-                                                "\n\n\u{2500}\u{2500} siblings \u{2500}\u{2500}",
-                                            );
+                                            out.push_str("\n\n-- siblings --");
                                             for s in &resolved {
                                                 let _ = write!(
                                                     out,
@@ -1259,7 +1277,7 @@ fn expand_match(m: &Match, scope: &Path) -> Option<(String, String)> {
                 continue;
             }
 
-            let _ = write!(out, "\n{i:>4} │ {line}");
+            let _ = write!(out, "\n{i:>4} | {line}");
             prev_blank = is_blank;
         }
     }
@@ -1282,9 +1300,9 @@ fn filter_code_lines(code: &str, skip_lines: &HashSet<u32>) -> String {
             continue;
         }
 
-        // Extract line number from formatted line: "  42 │ content"
+        // Extract line number from formatted line: "  42 | content"
         let line_num = segment
-            .find('│')
+            .find('|')
             .and_then(|pos| segment[..pos].trim().parse::<u32>().ok());
 
         if let Some(num) = line_num {
@@ -1365,7 +1383,7 @@ fn outline_context_for_match(
     let mut context = String::new();
     for (i, line) in outline_lines.iter().enumerate().take(end).skip(start) {
         if i == match_idx {
-            let _ = write!(context, "\n→ {line}");
+            let _ = write!(context, "\n-> {line}");
         } else {
             let _ = write!(context, "\n  {line}");
         }
@@ -2016,6 +2034,59 @@ mod tests {
         assert!(
             out.contains("[usage in function Foo.bar]"),
             "expected scope suffix in output, got: {out}"
+        );
+    }
+
+    #[test]
+    fn format_single_match_does_not_duplicate_expanded_line() {
+        use crate::types::Match;
+
+        // Small file (<50 lines) with no doc comment above the definition —
+        // the outline-context preview at line 627 prints `m.text` verbatim,
+        // and expand_match's whole-file expansion (small files expand fully,
+        // see EXPAND_FULL_FILE_THRESHOLD) includes that same source line
+        // again in the fence right below it.
+        let tmp = tempfile::tempdir().unwrap();
+        let p = tmp.path().join("small.rs");
+        let src = "pub struct Thing;\n\nimpl Thing {\n    pub fn exit_code(&self) -> i32 {\n        0\n    }\n}\n";
+        std::fs::write(&p, src).unwrap();
+
+        let m = Match {
+            path: p.clone(),
+            line: 4,
+            text: "    pub fn exit_code(&self) -> i32 {".to_string(),
+            is_definition: true,
+            exact: true,
+            file_lines: 7,
+            mtime: SystemTime::now(),
+            def_range: Some((4, 6)),
+            def_name: Some("exit_code".to_string()),
+            def_weight: 100,
+            impl_target: None,
+        };
+        let cache = OutlineCache::new();
+        let bloom = crate::index::bloom::BloomFilterCache::new();
+        let mut expand_remaining = 1usize;
+        let mut expanded_files: HashSet<PathBuf> = HashSet::new();
+        let mut out = String::new();
+
+        format_single_match(
+            &m,
+            tmp.path(),
+            &cache,
+            None,
+            &bloom,
+            &mut expand_remaining,
+            &mut expanded_files,
+            false,
+            &mut out,
+        );
+
+        let needle = "pub fn exit_code(&self) -> i32 {";
+        let occurrences = out.matches(needle).count();
+        assert_eq!(
+            occurrences, 1,
+            "expanded line must appear exactly once, got {occurrences} in: {out}"
         );
     }
 

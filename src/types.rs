@@ -20,7 +20,7 @@ pub enum QueryType {
 /// Programming language, carried through the type system so downstream
 /// code never re-detects. Adding a language means adding an arm here
 /// and the compiler tells you everywhere else.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Lang {
     Rust,
     TypeScript,
@@ -37,8 +37,39 @@ pub enum Lang {
     Swift,
     Kotlin,
     CSharp,
+    Elixir,
     Dockerfile,
     Make,
+}
+
+impl Lang {
+    /// Returns `true` if the language uses `'` for lifetime ticks (`'a`,
+    /// `'static`) rather than as a string/char delimiter.
+    ///
+    /// Lexers that scan `'` must disambiguate a lifetime from a single-quoted
+    /// literal; only Rust needs the lifetime branch.
+    pub(crate) fn has_lifetimes(self) -> bool {
+        match self {
+            Lang::Rust => true,
+            Lang::TypeScript
+            | Lang::Tsx
+            | Lang::JavaScript
+            | Lang::Python
+            | Lang::Go
+            | Lang::Java
+            | Lang::Scala
+            | Lang::C
+            | Lang::Cpp
+            | Lang::Ruby
+            | Lang::Php
+            | Lang::Swift
+            | Lang::Kotlin
+            | Lang::CSharp
+            | Lang::Elixir
+            | Lang::Dockerfile
+            | Lang::Make => false,
+        }
+    }
 }
 
 /// File type as detected by extension. Determines outline strategy.
@@ -57,16 +88,19 @@ pub enum FileType {
 pub enum ViewMode {
     Full,
     Outline,
+    Signature,
     Keys,
     #[allow(dead_code)]
     HeadTail,
     Empty,
     Generated,
+    Minified,
     #[allow(dead_code)]
     Binary,
     #[allow(dead_code)]
     Error,
     Section,
+    Stripped,
 }
 
 impl std::fmt::Display for ViewMode {
@@ -74,13 +108,16 @@ impl std::fmt::Display for ViewMode {
         match self {
             Self::Full => write!(f, "full"),
             Self::Outline => write!(f, "outline"),
+            Self::Signature => write!(f, "signature"),
             Self::Keys => write!(f, "keys"),
             Self::HeadTail => write!(f, "head+tail"),
             Self::Empty => write!(f, "empty"),
             Self::Generated => write!(f, "generated — skipped"),
+            Self::Minified => write!(f, "minified — skipped"),
             Self::Binary => write!(f, "skipped"),
             Self::Error => write!(f, "error"),
             Self::Section => write!(f, "section"),
+            Self::Stripped => write!(f, "stripped"),
         }
     }
 }
@@ -116,6 +153,22 @@ pub struct SearchResult {
     pub total_found: usize,
     pub definitions: usize,
     pub usages: usize,
+    /// Pre-cap subfacet counts. Computed in `symbol::search` by faceting the
+    /// merged set before truncation; used by the renderer to print
+    /// `displayed/total` headings and the per-facet hidden-count tail line.
+    pub facet_totals: FacetTotals,
+}
+
+/// Pre-cap counts per subfacet. Defaults to all-zero for callers that don't
+/// facet (`content::search`, `regex` paths) — the renderer renders a bare
+/// count when displayed == total, so zero totals never surface a header.
+#[derive(Debug, Default, Clone, Copy)]
+pub struct FacetTotals {
+    pub definitions: usize,
+    pub implementations: usize,
+    pub tests: usize,
+    pub usages_local: usize,
+    pub usages_cross: usize,
 }
 
 /// A single entry in a code outline.
@@ -130,7 +183,7 @@ pub struct OutlineEntry {
     pub doc: Option<String>,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum OutlineKind {
     Import,
     Function,

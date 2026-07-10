@@ -16,19 +16,48 @@
 pub(crate) mod budget;
 pub mod cache;
 pub(crate) mod classify;
-pub mod doctor;
+pub mod diff;
 pub(crate) mod edit;
+pub(crate) mod edit_parse_check;
 pub mod error;
 pub(crate) mod format;
 pub mod index;
 pub mod install;
+pub(crate) mod lang;
 pub mod map;
 pub mod mcp;
+pub mod overview;
+pub mod pager_guard;
 pub(crate) mod read;
 pub(crate) mod search;
-pub mod security;
 pub(crate) mod session;
+pub(crate) mod timeout;
 pub(crate) mod types;
+
+/// Re-exports for the fuzz harness. Not stable; do not depend on this.
+/// Items here are only `pub` so `fuzz/fuzz_targets/*.rs` can reach them
+/// without us widening the rest of the crate's pub(crate) surface.
+#[doc(hidden)]
+pub mod __fuzz {
+    use std::collections::HashSet;
+    use std::path::Path;
+
+    pub use crate::read::outline::code::outline;
+    pub use crate::types::Lang;
+
+    /// Wrapper: `strip_noise` is `pub(crate)`, so we re-export via a function
+    /// rather than `pub use` (which Rust forbids for less-visible items).
+    #[must_use]
+    pub fn strip_noise(content: &str, path: &Path, def_range: Option<(u32, u32)>) -> HashSet<u32> {
+        crate::search::strip::strip_noise(content, path, def_range)
+    }
+
+    /// Wrapper: same pattern for `parse_unified_diff`.
+    /// Returns unit because the fuzz target doesn't introspect the result.
+    pub fn parse_unified_diff(raw: &str) {
+        let _ = crate::diff::parse::parse_unified_diff(raw);
+    }
+}
 
 use std::path::Path;
 
@@ -41,9 +70,13 @@ use types::QueryType;
 /// Avoids scattered `Option<T>` + `unwrap()` throughout dispatch.
 struct ExpandedCtx {
     session: session::Session,
-    sym_index: index::SymbolIndex,
     bloom: index::bloom::BloomFilterCache,
     expand: usize,
+    /// Raises the search match cap (10 → 100). Driven by the explicit `--full`
+    /// flag, NOT by `full = !is_tty`. Piped invocation must preserve the
+    /// concise outline — see the `piped_invocation_does_not_auto_expand`
+    /// pin in `main.rs` for the larger design rule this enforces.
+    full_search: bool,
 }
 
 /// The single public API. Everything flows through here:
@@ -53,23 +86,51 @@ pub fn run(
     scope: &Path,
     section: Option<&str>,
     budget_tokens: Option<u64>,
+    glob: Option<&str>,
     cache: &OutlineCache,
 ) -> Result<String, TilthError> {
-    run_inner(query, scope, section, budget_tokens, false, 0, cache)
+    run_inner(
+        query,
+        scope,
+        section,
+        budget_tokens,
+        false,
+        0,
+        glob,
+        cache,
+        false,
+    )
 }
 
 /// Full variant — forces full file output, bypassing smart views.
+/// `full_file` covers piped-stdout promotion too; search cap bump never
+/// applies on this path (no expansion = no `run_query_expanded`).
 pub fn run_full(
     query: &str,
     scope: &Path,
     section: Option<&str>,
     budget_tokens: Option<u64>,
+    glob: Option<&str>,
     cache: &OutlineCache,
 ) -> Result<String, TilthError> {
-    run_inner(query, scope, section, budget_tokens, true, 0, cache)
+    run_inner(
+        query,
+        scope,
+        section,
+        budget_tokens,
+        true,
+        0,
+        glob,
+        cache,
+        false,
+    )
 }
 
 /// Run with expanded search — inline source for top N matches.
+/// `full` controls full-file display for `FilePath` queries (driven by
+/// `cli.full || !is_tty`). `cli_full` is the *parsed* `--full` flag and
+/// alone gates the search match-cap bump; piped invocation must not raise
+/// the cap (see `piped_invocation_does_not_auto_expand` pin).
 pub fn run_expanded(
     query: &str,
     scope: &Path,
@@ -77,9 +138,21 @@ pub fn run_expanded(
     budget_tokens: Option<u64>,
     full: bool,
     expand: usize,
+    glob: Option<&str>,
     cache: &OutlineCache,
+    cli_full: bool,
 ) -> Result<String, TilthError> {
-    run_inner(query, scope, section, budget_tokens, full, expand, cache)
+    run_inner(
+        query,
+        scope,
+        section,
+        budget_tokens,
+        full,
+        expand,
+        glob,
+        cache,
+        cli_full,
+    )
 }
 
 /// Find all callers of a symbol.
@@ -88,14 +161,13 @@ pub fn run_callers(
     scope: &Path,
     expand: usize,
     budget_tokens: Option<u64>,
-    cache: &OutlineCache,
+    glob: Option<&str>,
+    full: bool,
 ) -> Result<String, TilthError> {
-    let session = session::Session::new();
     let bloom = index::bloom::BloomFilterCache::new();
     let expand = if expand > 0 { expand } else { 2 };
-    let output = search::callers::search_callers_expanded(
-        target, scope, cache, &session, &bloom, expand, None,
-    )?;
+    let output =
+        search::callers::search_callers_expanded(target, scope, &bloom, expand, None, glob, full)?;
     match budget_tokens {
         Some(b) => Ok(budget::apply(&output, b)),
         None => Ok(output),
@@ -107,12 +179,27 @@ pub fn run_deps(
     path: &Path,
     scope: &Path,
     budget_tokens: Option<u64>,
-    cache: &OutlineCache,
 ) -> Result<String, TilthError> {
     let bloom = index::bloom::BloomFilterCache::new();
-    let result = search::deps::analyze_deps(path, scope, cache, &bloom)?;
+    let result = search::deps::analyze_deps(path, scope, &bloom)?;
     let budget_usize = budget_tokens.map(|b| b as usize);
     Ok(search::deps::format_deps(&result, scope, budget_usize))
+}
+
+/// Grok a symbol: return def + doc + callees + callers + siblings + tests in one call.
+///
+/// `target_spec` accepts a bare symbol name (`parse_unified_diff`), a path:line
+/// pair (`src/diff/parse.rs:7`), or a `Type::method` reference.
+pub fn run_grok(target_spec: &str, scope: &Path, full: bool) -> Result<String, TilthError> {
+    let bloom = index::bloom::BloomFilterCache::new();
+    let session = session::Session::default();
+    let caps = if full {
+        search::grok::GrokCaps::full()
+    } else {
+        search::grok::GrokCaps::default()
+    };
+    let result = search::grok::grok(target_spec, scope, &bloom, &session, caps)?;
+    Ok(search::grok::format_grok(&result, scope))
 }
 
 fn run_inner(
@@ -122,7 +209,9 @@ fn run_inner(
     budget_tokens: Option<u64>,
     full: bool,
     expand: usize,
+    glob: Option<&str>,
     cache: &OutlineCache,
+    cli_full: bool,
 ) -> Result<String, TilthError> {
     let query_type = classify(query, scope);
 
@@ -152,11 +241,10 @@ fn run_inner(
         }
         if parts.len() >= 2 && parts.len() <= 5 && all_identifiers {
             let session = session::Session::new();
-            let sym_index = index::SymbolIndex::new();
             let bloom = index::bloom::BloomFilterCache::new();
             let expand = if expand > 0 { expand } else { 2 };
             let output = search::search_multi_symbol_expanded(
-                &parts, scope, cache, &session, &sym_index, &bloom, expand, None,
+                &parts, scope, cache, &session, &bloom, expand, None, glob, cli_full,
             )?;
             return match budget_tokens {
                 Some(b) => Ok(budget::apply(&output, b)),
@@ -183,17 +271,17 @@ fn run_inner(
             }
             out
         }
-        QueryType::Glob(pattern) => search::search_glob(&pattern, scope, cache)?,
+        QueryType::Glob(pattern) => search::search_glob(&pattern, scope)?,
         _ if use_expanded => {
             let ctx = ExpandedCtx {
                 session: session::Session::new(),
-                sym_index: index::SymbolIndex::new(),
                 bloom: index::bloom::BloomFilterCache::new(),
                 expand,
+                full_search: cli_full,
             };
-            run_query_expanded(&query_type, scope, cache, &ctx)?
+            run_query_expanded(&query_type, scope, cache, &ctx, glob)?
         }
-        _ => run_query_basic(&query_type, scope, cache)?,
+        _ => run_query_basic(&query_type, scope, cache, glob)?,
     };
 
     match budget_tokens {
@@ -209,6 +297,7 @@ fn run_query_expanded(
     scope: &Path,
     cache: &OutlineCache,
     ctx: &ExpandedCtx,
+    glob: Option<&str>,
 ) -> Result<String, TilthError> {
     match query_type {
         QueryType::Symbol(name) => search::search_symbol_expanded(
@@ -216,14 +305,22 @@ fn run_query_expanded(
             scope,
             cache,
             &ctx.session,
-            &ctx.sym_index,
             &ctx.bloom,
             ctx.expand,
             None,
+            glob,
+            ctx.full_search,
         ),
-        QueryType::Concept(text) if text.contains(' ') => {
-            search::search_content_expanded(text, scope, cache, &ctx.session, ctx.expand, None)
-        }
+        QueryType::Concept(text) if text.contains(' ') => search::search_content_expanded(
+            text,
+            scope,
+            cache,
+            &ctx.session,
+            ctx.expand,
+            None,
+            glob,
+            ctx.full_search,
+        ),
         // Single-word Concept and Fallthrough share the same expanded path:
         // both go straight to symbol_expanded, intentionally bypassing the
         // definitions>0 / content fallback cascade in single_query_search.
@@ -233,17 +330,32 @@ fn run_query_expanded(
             scope,
             cache,
             &ctx.session,
-            &ctx.sym_index,
             &ctx.bloom,
             ctx.expand,
             None,
+            glob,
+            ctx.full_search,
         ),
-        QueryType::Content(text) => {
-            search::search_content_expanded(text, scope, cache, &ctx.session, ctx.expand, None)
-        }
-        QueryType::Regex(pattern) => {
-            search::search_regex_expanded(pattern, scope, cache, &ctx.session, ctx.expand, None)
-        }
+        QueryType::Content(text) => search::search_content_expanded(
+            text,
+            scope,
+            cache,
+            &ctx.session,
+            ctx.expand,
+            None,
+            glob,
+            ctx.full_search,
+        ),
+        QueryType::Regex(pattern) => search::search_regex_expanded(
+            pattern,
+            scope,
+            cache,
+            &ctx.session,
+            ctx.expand,
+            None,
+            glob,
+            ctx.full_search,
+        ),
         // FilePath/Glob never reach here (gated by use_expanded)
         QueryType::FilePath(_) | QueryType::Glob(_) => {
             unreachable!("non-search query type in expanded path")
@@ -257,21 +369,22 @@ fn run_query_basic(
     query_type: &QueryType,
     scope: &Path,
     cache: &OutlineCache,
+    glob: Option<&str>,
 ) -> Result<String, TilthError> {
     match query_type {
-        QueryType::Symbol(name) => search::search_symbol(name, scope, cache),
+        QueryType::Symbol(name) => search::search_symbol(name, scope, cache, glob),
         QueryType::Concept(text) if text.contains(' ') => {
-            multi_word_concept_search(text, scope, cache)
+            multi_word_concept_search(text, scope, cache, glob)
         }
         QueryType::Concept(text) => {
             // Single-word concept: prefer definitions, then content, then any match.
-            single_query_search(text, scope, cache, true)
+            single_query_search(text, scope, cache, true, glob)
         }
-        QueryType::Content(text) => search::search_content(text, scope, cache),
-        QueryType::Regex(pattern) => search::search_regex(pattern, scope, cache),
+        QueryType::Content(text) => search::search_content(text, scope, cache, glob),
+        QueryType::Regex(pattern) => search::search_regex(pattern, scope, cache, glob),
         QueryType::Fallthrough(text) => {
             // Accept any symbol match immediately (no definitions preference).
-            single_query_search(text, scope, cache, false)
+            single_query_search(text, scope, cache, false, glob)
         }
         // FilePath/Glob never reach here
         QueryType::FilePath(_) | QueryType::Glob(_) => {
@@ -290,8 +403,9 @@ fn single_query_search(
     scope: &Path,
     cache: &cache::OutlineCache,
     prefer_definitions: bool,
+    glob: Option<&str>,
 ) -> Result<String, error::TilthError> {
-    let sym_result = search::search_symbol_raw(text, scope)?;
+    let sym_result = search::search_symbol_raw(text, scope, glob)?;
     let accept_sym = if prefer_definitions {
         sym_result.definitions > 0
     } else {
@@ -302,7 +416,7 @@ fn single_query_search(
         return search::format_raw_result(&sym_result, cache);
     }
 
-    let content_result = search::search_content_raw(text, scope)?;
+    let content_result = search::search_content_raw(text, scope, glob)?;
     if content_result.total_found > 0 {
         return search::format_raw_result(&content_result, cache);
     }
@@ -323,9 +437,10 @@ fn multi_word_concept_search(
     text: &str,
     scope: &Path,
     cache: &cache::OutlineCache,
+    glob: Option<&str>,
 ) -> Result<String, error::TilthError> {
     // Try exact phrase match first
-    let mut content_result = search::search_content_raw(text, scope)?;
+    let mut content_result = search::search_content_raw(text, scope, glob)?;
     content_result.query = text.to_string();
     if content_result.total_found > 0 {
         return search::format_raw_result(&content_result, cache);
@@ -350,7 +465,7 @@ fn multi_word_concept_search(
             .join("|")
     };
 
-    let mut relaxed_result = search::search_regex_raw(&relaxed, scope)?;
+    let mut relaxed_result = search::search_regex_raw(&relaxed, scope, glob)?;
     relaxed_result.query = text.to_string();
     if relaxed_result.total_found > 0 {
         return search::format_raw_result(&relaxed_result, cache);

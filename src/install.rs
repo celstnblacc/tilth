@@ -1,5 +1,5 @@
 use std::fs;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
 use serde_json::{json, Value};
 
@@ -11,7 +11,7 @@ use serde_json::{json, Value};
 //   windsurf:       ~/.codeium/windsurf/mcp_config.json       (global)
 //   vscode:         .vscode/mcp.json                          (project scope)
 //   claude-desktop: ~/Library/Application Support/Claude/...  (global)
-//   opencode:       ~/.opencode.json                          (user scope)
+//   opencode:       ~/.config/opencode/opencode.json          (user scope, local entry)
 //   gemini:         ~/.gemini/settings.json                   (user scope)
 //   codex:          ~/.codex/config.toml                      (user scope, TOML)
 //   amp:            ~/.config/amp/settings.json                (user scope)
@@ -28,7 +28,7 @@ use serde_json::{json, Value};
 //   qwen-code:      ~/.qwen/settings.json                     (user scope)
 //   crush:          ~/.config/crush/crush.json                 (user scope)
 //   pi:             ~/.pi/agent/mcp.json                       (user scope)
-pub(crate) const SUPPORTED_HOSTS: &[&str] = &[
+const SUPPORTED_HOSTS: &[&str] = &[
     "claude-code",
     "cursor",
     "windsurf",
@@ -53,13 +53,24 @@ pub(crate) const SUPPORTED_HOSTS: &[&str] = &[
     "pi",
 ];
 
-/// The tilth server entry as JSON, for hosts that use JSON config.
-fn tilth_server_entry(edit: bool) -> Value {
+/// The tilth server entry as JSON. Format depends on the host's [`ConfigFormat`] variant.
+fn tilth_server_entry(edit: bool, format: &ConfigFormat) -> Value {
     let (command, args) = tilth_command_and_args(edit);
-    json!({
-        "command": command,
-        "args": args
-    })
+    match format {
+        ConfigFormat::Json { .. } => json!({
+            "command": command,
+            "args": args
+        }),
+        ConfigFormat::JsonLocal { .. } => {
+            let mut command_arr = vec![command];
+            command_arr.extend(args);
+            json!({
+                "type": "local",
+                "command": command_arr
+            })
+        }
+        ConfigFormat::Toml => unreachable!("tilth_server_entry called for TOML host"),
+    }
 }
 
 /// Write MCP config for the given host, preserving existing config.
@@ -72,15 +83,16 @@ pub fn run(host: &str, edit: bool) -> Result<(), String> {
     }
 
     match host_info.format {
-        ConfigFormat::Json { .. } => write_json_config(&host_info, edit)?,
+        ConfigFormat::Json { .. } | ConfigFormat::JsonLocal { .. } => {
+            write_json_config(&host_info, edit)?;
+        }
         ConfigFormat::Toml => write_toml_config(&host_info, edit)?,
     }
 
     if edit {
-        eprintln!("✓ tilth (read+edit mode) added to {}", host_info.path.display());
+        eprintln!("✓ tilth (edit mode) added to {}", host_info.path.display());
     } else {
-        eprintln!("✓ tilth (read-only mode) added to {}", host_info.path.display());
-        eprintln!("  Use --edit to enable write operations (tilth_edit tool).");
+        eprintln!("✓ tilth added to {}", host_info.path.display());
     }
     if let Some(note) = host_info.note {
         eprintln!("  {note}");
@@ -90,7 +102,7 @@ pub fn run(host: &str, edit: bool) -> Result<(), String> {
 
 fn write_json_config(host_info: &HostInfo, edit: bool) -> Result<(), String> {
     let servers_key = match host_info.format {
-        ConfigFormat::Json { servers_key } => servers_key,
+        ConfigFormat::Json { servers_key } | ConfigFormat::JsonLocal { servers_key } => servers_key,
         ConfigFormat::Toml => unreachable!("write_json_config called for TOML host"),
     };
 
@@ -103,17 +115,16 @@ fn write_json_config(host_info: &HostInfo, edit: bool) -> Result<(), String> {
         json!({})
     };
 
-    upsert_json_server(&mut config, servers_key, tilth_server_entry(edit))?;
+    upsert_json_server(
+        &mut config,
+        servers_key,
+        tilth_server_entry(edit, &host_info.format),
+    )?;
 
     let out =
         serde_json::to_string_pretty(&config).expect("serde_json::Value is always serializable");
-
-    // Validate the output parses before touching disk.
-    serde_json::from_str::<Value>(&out)
-        .map_err(|e| format!("post-merge JSON validation failed: {e}"))?;
-
-    backup_file(&host_info.path)?;
-    atomic_write(&host_info.path, out.as_bytes())?;
+    fs::write(&host_info.path, &out)
+        .map_err(|e| format!("failed to write {}: {e}", host_info.path.display()))?;
     Ok(())
 }
 
@@ -139,63 +150,48 @@ fn write_toml_config(host_info: &HostInfo, edit: bool) -> Result<(), String> {
         String::new()
     };
 
-    // Remove existing [mcp_servers.tilth] section if present
-    let output = if let Some(start) = existing.find("[mcp_servers.tilth]") {
-        // Find end of section: next [header] or EOF
-        let rest = &existing[start..];
-        let end = rest[1..] // skip the opening '['
-            .find("\n[")
-            .map_or(existing.len(), |i| start + 1 + i + 1);
-        format!("{}{}{}", &existing[..start], section, &existing[end..])
-    } else {
-        // Append with a blank line separator
+    let output = upsert_toml_section(&existing, "[mcp_servers.tilth]", &section);
+
+    fs::write(&host_info.path, &output)
+        .map_err(|e| format!("failed to write {}: {e}", host_info.path.display()))?;
+    Ok(())
+}
+
+/// Finds a TOML table header anchored to a line start (or the file start),
+/// returning the byte offset of its opening `[`.
+///
+/// A bare substring search matches the header text inside a comment or string,
+/// then splices from that offset and corrupts a hand-edited config. Anchoring to
+/// `\n<header>` (or start-of-file) only matches a real table header.
+fn find_section_start(text: &str, header: &str) -> Option<usize> {
+    if text.starts_with(header) {
+        return Some(0);
+    }
+    let needle = format!("\n{header}");
+    text.find(&needle).map(|newline_at| newline_at + 1)
+}
+
+/// Replaces an existing `header` table with `section`, or appends `section`
+/// (blank-line separated) when the table is absent. The match is line-anchored
+/// via [`find_section_start`], and the section end is the next table header.
+fn upsert_toml_section(existing: &str, header: &str, section: &str) -> String {
+    let Some(start) = find_section_start(existing, header) else {
         let sep = if existing.is_empty() || existing.ends_with('\n') {
             ""
         } else {
             "\n"
         };
-        format!("{existing}{sep}\n{section}")
+        return format!("{existing}{sep}\n{section}");
     };
 
-    backup_file(&host_info.path)?;
-    atomic_write(&host_info.path, output.as_bytes())?;
-    Ok(())
-}
-
-// ---------------------------------------------------------------------------
-// Atomic write + backup helpers
-// ---------------------------------------------------------------------------
-
-/// Write `content` to `path` atomically: write to `path.tmp`, then rename.
-///
-/// Rename is atomic on POSIX filesystems (same volume). On Windows, `fs::rename`
-/// replaces the destination atomically on NTFS since Vista.
-fn atomic_write(path: &Path, content: &[u8]) -> Result<(), String> {
-    let tmp = path.with_extension("tmp");
-    fs::write(&tmp, content)
-        .map_err(|e| format!("failed to write temp file {}: {e}", tmp.display()))?;
-    fs::rename(&tmp, path).map_err(|e| {
-        let _ = fs::remove_file(&tmp); // best-effort cleanup
-        format!("failed to rename {} → {}: {e}", tmp.display(), path.display())
-    })
-}
-
-/// If `path` exists, copy it to `path.bak` before overwriting.
-/// No-op if the file does not exist yet (first install).
-fn backup_file(path: &Path) -> Result<(), String> {
-    if !path.exists() {
-        return Ok(());
-    }
-    let backup = path.with_extension("bak");
-    fs::copy(path, &backup)
-        .map_err(|e| format!("failed to backup {} → {}: {e}", path.display(), backup.display()))?;
-    Ok(())
+    let rest = &existing[start..];
+    let end = rest[1..] // skip the opening '['
+        .find("\n[")
+        .map_or(existing.len(), |i| start + 1 + i + 1);
+    format!("{}{}{}", &existing[..start], section, &existing[end..])
 }
 
 /// Returns (command, args) for the tilth MCP server entry.
-///
-/// To log MCP traffic for tilth, install keylogger-mcp and run after install:
-///     keylogger-mcp wrap <host> tilth
 fn tilth_command_and_args(edit: bool) -> (String, Vec<String>) {
     let mut mcp_args: Vec<String> = vec!["--mcp".into()];
     if edit {
@@ -221,26 +217,27 @@ fn tilth_command_and_args(edit: bool) -> (String, Vec<String>) {
 }
 
 #[derive(Debug)]
-pub(crate) enum ConfigFormat {
-    /// JSON with a configurable servers key ("mcpServers" or "servers").
+enum ConfigFormat {
+    /// JSON with a configurable servers key, using standard {command, args} entry shape.
     Json { servers_key: &'static str },
+    /// JSON with a configurable servers key, using opencode's local entry shape {type, command[]}.
+    JsonLocal { servers_key: &'static str },
     /// TOML with `[mcp_servers.<name>]` sections.
     Toml,
 }
 
-pub(crate) struct HostInfo {
-    pub(crate) path: PathBuf,
-    pub(crate) format: ConfigFormat,
+struct HostInfo {
+    path: PathBuf,
+    format: ConfigFormat,
     /// Optional note printed after success.
     note: Option<&'static str>,
 }
 
-pub(crate) fn resolve_host(host: &str) -> Result<HostInfo, String> {
+fn resolve_host(host: &str) -> Result<HostInfo, String> {
     let home = home_dir()?;
 
     match host {
         // Claude Code user scope: ~/.claude.json → mcpServers
-        // Available in all projects without checking into source control.
         "claude-code" => Ok(HostInfo {
             path: home.join(".claude.json"),
             format: ConfigFormat::Json {
@@ -284,13 +281,10 @@ pub(crate) fn resolve_host(host: &str) -> Result<HostInfo, String> {
             note: None,
         }),
 
-        // OpenCode user scope: ~/.opencode.json → mcpServers
-        // Verified from opencode source: internal/config/config.go (viper config name ".opencode")
+        // OpenCode user scope: ~/.config/opencode/opencode.json → mcp (local entry shape)
         "opencode" => Ok(HostInfo {
-            path: home.join(".opencode.json"),
-            format: ConfigFormat::Json {
-                servers_key: "mcpServers",
-            },
+            path: home.join(".config/opencode/opencode.json"),
+            format: ConfigFormat::JsonLocal { servers_key: "mcp" },
             note: Some("User scope — available in all projects."),
         }),
 
@@ -455,20 +449,9 @@ pub(crate) fn resolve_host(host: &str) -> Result<HostInfo, String> {
     }
 }
 
+/// Cross-platform home-directory lookup, with an actionable error message.
 fn home_dir() -> Result<PathBuf, String> {
-    #[cfg(target_os = "windows")]
-    {
-        std::env::var("USERPROFILE")
-            .map(PathBuf::from)
-            .map_err(|_| "USERPROFILE not set".into())
-    }
-
-    #[cfg(not(target_os = "windows"))]
-    {
-        std::env::var("HOME")
-            .map(PathBuf::from)
-            .map_err(|_| "HOME not set".into())
-    }
+    home::home_dir().ok_or_else(|| "home directory not found ($HOME / $USERPROFILE)".into())
 }
 
 /// Merge a tilth server entry into a JSON config under the given servers key.
@@ -535,93 +518,78 @@ fn claude_desktop_path() -> Result<PathBuf, String> {
     }
 }
 
-// ---------------------------------------------------------------------------
-// Doctor — health check across registered MCP hosts
-// ---------------------------------------------------------------------------
-
-/// Trust level of the tilth registration in an MCP host.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum TrustLevel {
-    /// Read-only: no `tilth_edit` tool exposed (default install).
-    ReadOnly,
-    /// Read + edit: `tilth_edit` enabled via `--edit` flag.
-    ReadEdit,
-}
-
-/// Returns true if `cmd` (bare filename) resolves to an executable on `$PATH`,
-/// or if `cmd` is an absolute/relative path pointing to an existing file.
-fn command_in_path(cmd: &str) -> bool {
-    // Absolute or explicitly relative path — check directly.
-    let p = PathBuf::from(cmd);
-    if p.is_absolute() || cmd.contains('/') || cmd.contains('\\') {
-        return p.is_file();
-    }
-    // Bare name — walk PATH.
-    let Some(path_var) = std::env::var_os("PATH") else {
-        return false;
-    };
-    std::env::split_paths(&path_var).any(|dir| dir.join(cmd).is_file())
-}
-
-/// Extract the tilth command and trust level registered in `info`'s config file.
-/// Returns `Some((command_string, command_is_reachable, trust_level))` or `None` when
-/// tilth is not registered (or the config file doesn't exist / is unreadable).
-pub(crate) fn check_registration(info: &HostInfo) -> Option<(String, bool, TrustLevel)> {
-    if !info.path.exists() {
-        return None;
-    }
-    let raw = fs::read_to_string(&info.path).ok()?;
-    match &info.format {
-        ConfigFormat::Json { servers_key } => {
-            let config: Value = serde_json::from_str(&raw).ok()?;
-            // JSON Pointer: dots in servers_key are literal per RFC 6901.
-            let pointer = format!("/{servers_key}/tilth");
-            let entry = config.pointer(&pointer)?;
-            let command = entry.get("command")?.as_str()?.to_string();
-            let args = entry
-                .get("args")
-                .and_then(|a| a.as_array())
-                .map(|arr| arr.iter().filter_map(|v| v.as_str()).collect::<Vec<_>>())
-                .unwrap_or_default();
-            let trust = if args.contains(&"--edit") {
-                TrustLevel::ReadEdit
-            } else {
-                TrustLevel::ReadOnly
-            };
-            let ok = command_in_path(&command);
-            Some((command, ok, trust))
-        }
-        ConfigFormat::Toml => {
-            let section_start = raw.find("[mcp_servers.tilth]")?;
-            let section = &raw[section_start..];
-            let mut command = None;
-            let mut has_edit = false;
-            for line in section.lines().skip(1) {
-                if line.trim_start().starts_with('[') {
-                    break; // next section
-                }
-                if let Some(rest) = line.trim_start().strip_prefix("command") {
-                    if let Some(rest) = rest.trim_start().strip_prefix('=') {
-                        command = Some(rest.trim().trim_matches('"').trim_matches('\'').to_string());
-                    }
-                }
-                if line.contains("\"--edit\"") || line.contains("'--edit'") {
-                    has_edit = true;
-                }
-            }
-            let command = command?;
-            let ok = command_in_path(&command);
-            let trust = if has_edit { TrustLevel::ReadEdit } else { TrustLevel::ReadOnly };
-            Some((command, ok, trust))
-        }
-    }
-}
-
-// `pub fn doctor` removed in v0.8.0 — see src/doctor.rs for the merged implementation.
-
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    const TILTH_HEADER: &str = "[mcp_servers.tilth]";
+
+    #[test]
+    fn toml_section_appended_when_absent() {
+        let out = upsert_toml_section(
+            "[other]\nk = 1\n",
+            TILTH_HEADER,
+            "[mcp_servers.tilth]\ncommand = \"x\"\n",
+        );
+        assert!(out.contains("[other]"));
+        assert!(out.contains("[mcp_servers.tilth]\ncommand = \"x\""));
+    }
+
+    #[test]
+    fn toml_header_in_comment_is_not_spliced() {
+        let existing = "# legacy note about [mcp_servers.tilth] kept for humans\n[other]\nk = 1\n";
+        let out = upsert_toml_section(
+            existing,
+            TILTH_HEADER,
+            "[mcp_servers.tilth]\ncommand = \"x\"\n",
+        );
+        assert!(
+            out.contains("# legacy note about [mcp_servers.tilth] kept for humans"),
+            "comment corrupted by a substring splice: {out:?}"
+        );
+        assert!(out.contains("[other]"));
+        assert!(out.contains("command = \"x\""));
+    }
+
+    #[test]
+    fn toml_section_replaced_at_line_start() {
+        let existing = "[mcp_servers.tilth]\ncommand = \"old\"\nargs = []\n[other]\nk = 1\n";
+        let out = upsert_toml_section(
+            existing,
+            TILTH_HEADER,
+            "[mcp_servers.tilth]\ncommand = \"new\"\n",
+        );
+        assert!(out.contains("command = \"new\""));
+        assert!(!out.contains("\"old\""), "old section not removed: {out:?}");
+        assert!(out.contains("[other]"));
+    }
+
+    #[test]
+    fn toml_section_replaced_at_start_of_file() {
+        let existing = "[mcp_servers.tilth]\ncommand = \"old\"\n";
+        let out = upsert_toml_section(
+            existing,
+            TILTH_HEADER,
+            "[mcp_servers.tilth]\ncommand = \"new\"\n",
+        );
+        assert!(out.contains("\"new\""));
+        assert!(!out.contains("\"old\""));
+    }
+
+    #[test]
+    fn toml_section_replacement_handles_multiline_arrays_before_next_table() {
+        let existing = "[mcp_servers.tilth]\ncommand = \"old\"\nargs = [\n  \"old-a\",\n  \"old-b\",\n]\n[other]\nk = 1\n";
+        let out = upsert_toml_section(
+            existing,
+            TILTH_HEADER,
+            "[mcp_servers.tilth]\ncommand = \"new\"\nargs = [\"new\"]\n",
+        );
+
+        assert_eq!(
+            out,
+            "[mcp_servers.tilth]\ncommand = \"new\"\nargs = [\"new\"]\n[other]\nk = 1\n"
+        );
+    }
 
     #[test]
     fn amp_resolve_host() {
@@ -635,6 +603,7 @@ mod tests {
             ConfigFormat::Json { servers_key } => {
                 assert_eq!(servers_key, "amp.mcpServers");
             }
+            ConfigFormat::JsonLocal { .. } => panic!("amp should use Json format, not JsonLocal"),
             ConfigFormat::Toml => panic!("amp should use JSON format, not TOML"),
         }
     }
@@ -711,6 +680,7 @@ mod tests {
             ConfigFormat::Json { servers_key } => {
                 assert_eq!(servers_key, "mcpServers");
             }
+            ConfigFormat::JsonLocal { .. } => panic!("droid should use Json format, not JsonLocal"),
             ConfigFormat::Toml => panic!("droid should use JSON format, not TOML"),
         }
     }
@@ -751,6 +721,9 @@ mod tests {
         match info.format {
             ConfigFormat::Json { servers_key } => {
                 assert_eq!(servers_key, "mcpServers");
+            }
+            ConfigFormat::JsonLocal { .. } => {
+                panic!("antigravity should use Json format, not JsonLocal")
             }
             ConfigFormat::Toml => panic!("antigravity should use JSON format, not TOML"),
         }
@@ -793,6 +766,7 @@ mod tests {
             ConfigFormat::Json { servers_key } => {
                 assert_eq!(servers_key, "context_servers");
             }
+            ConfigFormat::JsonLocal { .. } => panic!("zed should use Json format, not JsonLocal"),
             ConfigFormat::Toml => panic!("zed should use JSON format, not TOML"),
         }
     }
@@ -823,6 +797,9 @@ mod tests {
             ConfigFormat::Json { servers_key } => {
                 assert_eq!(servers_key, "mcpServers");
             }
+            ConfigFormat::JsonLocal { .. } => {
+                panic!("copilot-cli should use Json format, not JsonLocal")
+            }
             ConfigFormat::Toml => panic!("copilot-cli should use JSON format, not TOML"),
         }
     }
@@ -838,6 +815,9 @@ mod tests {
         match info.format {
             ConfigFormat::Json { servers_key } => {
                 assert_eq!(servers_key, "mcpServers");
+            }
+            ConfigFormat::JsonLocal { .. } => {
+                panic!("augment should use Json format, not JsonLocal")
             }
             ConfigFormat::Toml => panic!("augment should use JSON format, not TOML"),
         }
@@ -855,6 +835,7 @@ mod tests {
             ConfigFormat::Json { servers_key } => {
                 assert_eq!(servers_key, "mcpServers");
             }
+            ConfigFormat::JsonLocal { .. } => panic!("kiro should use Json format, not JsonLocal"),
             ConfigFormat::Toml => panic!("kiro should use JSON format, not TOML"),
         }
     }
@@ -870,6 +851,9 @@ mod tests {
         match info.format {
             ConfigFormat::Json { servers_key } => {
                 assert_eq!(servers_key, "mcpServers");
+            }
+            ConfigFormat::JsonLocal { .. } => {
+                panic!("kilo-code should use Json format, not JsonLocal")
             }
             ConfigFormat::Toml => panic!("kilo-code should use JSON format, not TOML"),
         }
@@ -888,6 +872,7 @@ mod tests {
             ConfigFormat::Json { servers_key } => {
                 assert_eq!(servers_key, "mcpServers");
             }
+            ConfigFormat::JsonLocal { .. } => panic!("cline should use Json format, not JsonLocal"),
             ConfigFormat::Toml => panic!("cline should use JSON format, not TOML"),
         }
     }
@@ -905,6 +890,9 @@ mod tests {
             ConfigFormat::Json { servers_key } => {
                 assert_eq!(servers_key, "mcpServers");
             }
+            ConfigFormat::JsonLocal { .. } => {
+                panic!("roo-code should use Json format, not JsonLocal")
+            }
             ConfigFormat::Toml => panic!("roo-code should use JSON format, not TOML"),
         }
     }
@@ -921,6 +909,7 @@ mod tests {
             ConfigFormat::Json { servers_key } => {
                 assert_eq!(servers_key, "mcpServers");
             }
+            ConfigFormat::JsonLocal { .. } => panic!("trae should use Json format, not JsonLocal"),
             ConfigFormat::Toml => panic!("trae should use JSON format, not TOML"),
         }
         assert_eq!(
@@ -941,6 +930,9 @@ mod tests {
             ConfigFormat::Json { servers_key } => {
                 assert_eq!(servers_key, "mcpServers");
             }
+            ConfigFormat::JsonLocal { .. } => {
+                panic!("qwen-code should use Json format, not JsonLocal")
+            }
             ConfigFormat::Toml => panic!("qwen-code should use JSON format, not TOML"),
         }
     }
@@ -957,6 +949,7 @@ mod tests {
             ConfigFormat::Json { servers_key } => {
                 assert_eq!(servers_key, "mcp");
             }
+            ConfigFormat::JsonLocal { .. } => panic!("crush should use Json format, not JsonLocal"),
             ConfigFormat::Toml => panic!("crush should use JSON format, not TOML"),
         }
     }
@@ -984,147 +977,9 @@ mod tests {
             ConfigFormat::Json { servers_key } => {
                 assert_eq!(servers_key, "mcpServers");
             }
+            ConfigFormat::JsonLocal { .. } => panic!("pi should use Json format, not JsonLocal"),
             ConfigFormat::Toml => panic!("pi should use JSON format, not TOML"),
         }
-    }
-
-    // -----------------------------------------------------------------------
-    // Atomic write + backup tests
-    // -----------------------------------------------------------------------
-
-    #[test]
-    fn atomic_write_creates_file() {
-        let dir = tempfile::tempdir().expect("tempdir");
-        let path = dir.path().join("out.json");
-        atomic_write(&path, b"{\"ok\":true}").unwrap();
-        assert!(path.exists());
-        let content = fs::read_to_string(&path).unwrap();
-        assert!(content.contains("\"ok\""));
-    }
-
-    #[test]
-    fn atomic_write_no_tmp_left_on_success() {
-        let dir = tempfile::tempdir().expect("tempdir");
-        let path = dir.path().join("out.json");
-        atomic_write(&path, b"{}").unwrap();
-        let tmp = path.with_extension("tmp");
-        assert!(!tmp.exists(), ".tmp file should be gone after rename");
-    }
-
-    #[test]
-    fn backup_file_creates_bak() {
-        let dir = tempfile::tempdir().expect("tempdir");
-        let path = dir.path().join("cfg.json");
-        fs::write(&path, b"{\"original\":true}").unwrap();
-        backup_file(&path).unwrap();
-        let bak = path.with_extension("bak");
-        assert!(bak.exists(), ".bak should be created");
-        let content = fs::read_to_string(&bak).unwrap();
-        assert!(content.contains("\"original\""));
-    }
-
-    #[test]
-    fn backup_file_noop_when_missing() {
-        let dir = tempfile::tempdir().expect("tempdir");
-        let path = dir.path().join("nonexistent.json");
-        // Should not error — first install has nothing to back up
-        backup_file(&path).unwrap();
-        assert!(!path.with_extension("bak").exists());
-    }
-
-    #[test]
-    fn install_json_roundtrip_valid() {
-        // write_json_config produces a valid config the next read parses correctly
-        let dir = tempfile::tempdir().expect("tempdir");
-        let path = dir.path().join("cfg.json");
-        let info = HostInfo {
-            path: path.clone(),
-            format: ConfigFormat::Json { servers_key: "mcpServers" },
-            note: None,
-        };
-        write_json_config(&info, false).unwrap();
-        let raw = fs::read_to_string(&path).unwrap();
-        let v: Value = serde_json::from_str(&raw).expect("output must be valid JSON");
-        assert!(v["mcpServers"]["tilth"].is_object());
-    }
-
-    #[test]
-    fn install_json_creates_backup_on_update() {
-        let dir = tempfile::tempdir().expect("tempdir");
-        let path = dir.path().join("cfg.json");
-        // First write
-        let info = HostInfo { path: path.clone(), format: ConfigFormat::Json { servers_key: "mcpServers" }, note: None };
-        write_json_config(&info, false).unwrap();
-        // Second write should produce a .bak
-        write_json_config(&info, false).unwrap();
-        assert!(path.with_extension("bak").exists(), ".bak should be created on second write");
-    }
-
-    #[test]
-    fn install_toml_roundtrip_valid() {
-        let dir = tempfile::tempdir().expect("tempdir");
-        let path = dir.path().join("config.toml");
-        let info = HostInfo { path: path.clone(), format: ConfigFormat::Toml, note: None };
-        write_toml_config(&info, false).unwrap();
-        let raw = fs::read_to_string(&path).unwrap();
-        assert!(raw.contains("[mcp_servers.tilth]"), "TOML must contain section");
-        assert!(raw.contains("command ="), "TOML must contain command");
-    }
-
-    #[test]
-    fn install_toml_creates_backup_on_update() {
-        let dir = tempfile::tempdir().expect("tempdir");
-        let path = dir.path().join("config.toml");
-        let info = HostInfo { path: path.clone(), format: ConfigFormat::Toml, note: None };
-        write_toml_config(&info, false).unwrap();
-        write_toml_config(&info, false).unwrap();
-        assert!(path.with_extension("bak").exists(), ".bak should be created on second write");
-    }
-
-    // -----------------------------------------------------------------------
-    // Trust level detection tests
-    // -----------------------------------------------------------------------
-
-    #[test]
-    fn trust_level_read_only_when_no_edit_flag() {
-        let dir = tempfile::tempdir().expect("tempdir");
-        let path = dir.path().join("mcp.json");
-        let content = r#"{"mcpServers":{"tilth":{"command":"tilth","args":["--mcp"]}}}"#;
-        fs::write(&path, content).unwrap();
-        let info = HostInfo { path, format: ConfigFormat::Json { servers_key: "mcpServers" }, note: None };
-        let (_, _, trust) = check_registration(&info).unwrap();
-        assert_eq!(trust, TrustLevel::ReadOnly);
-    }
-
-    #[test]
-    fn trust_level_read_edit_when_edit_flag_present() {
-        let dir = tempfile::tempdir().expect("tempdir");
-        let path = dir.path().join("mcp.json");
-        let content = r#"{"mcpServers":{"tilth":{"command":"tilth","args":["--mcp","--edit"]}}}"#;
-        fs::write(&path, content).unwrap();
-        let info = HostInfo { path, format: ConfigFormat::Json { servers_key: "mcpServers" }, note: None };
-        let (_, _, trust) = check_registration(&info).unwrap();
-        assert_eq!(trust, TrustLevel::ReadEdit);
-    }
-
-    #[test]
-    fn trust_level_toml_read_only() {
-        let dir = tempfile::tempdir().expect("tempdir");
-        let path = dir.path().join("config.toml");
-        fs::write(&path, "\n[mcp_servers.tilth]\ncommand = \"tilth\"\nargs = [\"--mcp\"]\n").unwrap();
-        let info = HostInfo { path, format: ConfigFormat::Toml, note: None };
-        let (_, _, trust) = check_registration(&info).unwrap();
-        assert_eq!(trust, TrustLevel::ReadOnly);
-    }
-
-    #[test]
-    fn trust_level_toml_read_edit() {
-        let dir = tempfile::tempdir().expect("tempdir");
-        let path = dir.path().join("config.toml");
-        fs::write(&path, "\n[mcp_servers.tilth]\ncommand = \"tilth\"\nargs = [\"--mcp\", \"--edit\"]\n").unwrap();
-        let info = HostInfo { path, format: ConfigFormat::Toml, note: None };
-        let (_, _, trust) = check_registration(&info).unwrap();
-        assert_eq!(trust, TrustLevel::ReadEdit);
     }
 
     #[test]
@@ -1138,160 +993,62 @@ mod tests {
         );
     }
 
-    // -----------------------------------------------------------------------
-    // Doctor — check_registration and command_in_path unit tests
-    // -----------------------------------------------------------------------
-
     #[test]
-    fn doctor_check_registration_json_registered() {
-        let dir = tempfile::tempdir().expect("tempdir");
-        let path = dir.path().join("mcp.json");
-        let content = r#"{"mcpServers":{"tilth":{"command":"/usr/local/bin/tilth","args":["--mcp"]}}}"#;
-        fs::write(&path, content).unwrap();
-
-        let info = HostInfo {
-            path: path.clone(),
-            format: ConfigFormat::Json {
-                servers_key: "mcpServers",
-            },
-            note: None,
-        };
-
-        let result = check_registration(&info);
-        assert!(result.is_some(), "tilth is registered — should return Some");
-        let (cmd, _ok, _trust) = result.unwrap();
-        assert_eq!(cmd, "/usr/local/bin/tilth");
-    }
-
-    #[test]
-    fn doctor_check_registration_json_not_registered() {
-        let dir = tempfile::tempdir().expect("tempdir");
-        let path = dir.path().join("mcp.json");
-        fs::write(&path, r#"{"mcpServers":{"other":{"command":"foo"}}}"#).unwrap();
-
-        let info = HostInfo {
-            path,
-            format: ConfigFormat::Json {
-                servers_key: "mcpServers",
-            },
-            note: None,
-        };
-
+    fn opencode_resolve_host() {
+        let info = resolve_host("opencode").expect("opencode should resolve");
         assert!(
-            check_registration(&info).is_none(),
-            "tilth not in config — should return None"
+            info.path.ends_with(".config/opencode/opencode.json"),
+            "path should end with .config/opencode/opencode.json, got: {}",
+            info.path.display()
         );
-    }
-
-    #[test]
-    fn doctor_check_registration_toml_registered() {
-        let dir = tempfile::tempdir().expect("tempdir");
-        let path = dir.path().join("config.toml");
-        let content = "\n[mcp_servers.tilth]\ncommand = \"/usr/local/bin/tilth\"\nargs = [\"--mcp\"]\n";
-        fs::write(&path, content).unwrap();
-
-        let info = HostInfo {
-            path,
-            format: ConfigFormat::Toml,
-            note: None,
-        };
-
-        let result = check_registration(&info);
-        assert!(result.is_some(), "tilth section present — should return Some");
-        let (cmd, _ok, _trust) = result.unwrap();
-        assert_eq!(cmd, "/usr/local/bin/tilth");
-    }
-
-    #[test]
-    fn doctor_check_registration_toml_not_registered() {
-        let dir = tempfile::tempdir().expect("tempdir");
-        let path = dir.path().join("config.toml");
-        fs::write(&path, "[other_section]\nkey = \"value\"\n").unwrap();
-
-        let info = HostInfo {
-            path,
-            format: ConfigFormat::Toml,
-            note: None,
-        };
-
-        assert!(
-            check_registration(&info).is_none(),
-            "no tilth section — should return None"
-        );
-    }
-
-    #[test]
-    fn doctor_check_registration_missing_config() {
-        let dir = tempfile::tempdir().expect("tempdir");
-        let info = HostInfo {
-            path: dir.path().join("nonexistent.json"),
-            format: ConfigFormat::Json {
-                servers_key: "mcpServers",
-            },
-            note: None,
-        };
-
-        assert!(
-            check_registration(&info).is_none(),
-            "missing config file — should return None"
-        );
-    }
-
-    #[test]
-    fn doctor_command_in_path_found() {
-        // "sh" must exist on any Unix system (and cmd.exe on Windows)
-        #[cfg(not(target_os = "windows"))]
-        assert!(command_in_path("sh"), "sh should be found on PATH");
-    }
-
-    #[test]
-    fn doctor_command_in_path_not_found() {
-        assert!(
-            !command_in_path("__tilth_definitely_not_a_real_binary_xyz123__"),
-            "fake binary should not be found on PATH"
-        );
-    }
-
-    #[test]
-    fn doctor_command_in_path_absolute_existing() {
-        // /bin/sh always exists on Unix
-        #[cfg(not(target_os = "windows"))]
-        {
-            let path = if std::path::Path::new("/bin/sh").exists() {
-                "/bin/sh"
-            } else {
-                "/usr/bin/env"
-            };
-            assert!(command_in_path(path), "{path} should resolve as existing file");
+        match info.format {
+            ConfigFormat::JsonLocal { servers_key } => {
+                assert_eq!(servers_key, "mcp");
+            }
+            ConfigFormat::Json { .. } => panic!("opencode should use JsonLocal format, not Json"),
+            ConfigFormat::Toml => panic!("opencode should use JSON format, not TOML"),
         }
     }
 
     #[test]
-    fn doctor_command_in_path_absolute_missing() {
-        assert!(
-            !command_in_path("/nonexistent/path/to/tilth"),
-            "nonexistent absolute path should return false"
-        );
+    fn opencode_entry_uses_local_shape() {
+        let entry = tilth_server_entry(false, &ConfigFormat::JsonLocal { servers_key: "mcp" });
+        assert_eq!(entry["type"], json!("local"));
+        assert!(entry["command"].is_array());
+        assert!(entry.get("args").is_none());
     }
 
     #[test]
-    fn doctor_json_output_is_valid_json() {
-        // Smoke test: doctor(true) should not panic and should produce parseable JSON.
-        // We capture stdout by running the serialisation logic directly.
-        let tilth_version = env!("CARGO_PKG_VERSION");
-        let hosts_map: serde_json::Map<String, Value> = serde_json::Map::new();
-        let registered_hosts: Vec<String> = vec![];
-        let output = json!({
-            "tilth_version": tilth_version,
-            "healthy": false,
-            "registered_hosts": registered_hosts,
-            "hosts": hosts_map,
-        });
-        let s = serde_json::to_string_pretty(&output).unwrap();
-        let parsed: Value = serde_json::from_str(&s).unwrap();
-        assert_eq!(parsed["healthy"], json!(false));
-        assert!(parsed["tilth_version"].is_string());
-        assert!(parsed["registered_hosts"].is_array());
-        assert!(parsed["hosts"].is_object());
+    fn opencode_entry_with_edit() {
+        let entry = tilth_server_entry(true, &ConfigFormat::JsonLocal { servers_key: "mcp" });
+        assert_eq!(entry["type"], json!("local"));
+        let cmd = entry["command"].as_array().unwrap();
+        assert!(cmd.iter().any(|v| v == "--edit"));
+        assert!(cmd.iter().any(|v| v == "--mcp"));
+    }
+
+    #[test]
+    fn standard_entry_format() {
+        let entry = tilth_server_entry(
+            false,
+            &ConfigFormat::Json {
+                servers_key: "mcpServers",
+            },
+        );
+        assert!(entry.get("type").is_none());
+        assert!(entry["command"].is_string());
+        assert!(entry["args"].is_array());
+    }
+
+    #[test]
+    fn opencode_upserts_under_mcp_key() {
+        let mut config = json!({});
+        let entry = tilth_server_entry(false, &ConfigFormat::JsonLocal { servers_key: "mcp" });
+        upsert_json_server(&mut config, "mcp", entry).unwrap();
+
+        assert!(config.get("mcp").is_some());
+        assert!(config.get("mcpServers").is_none());
+        assert_eq!(config["mcp"]["tilth"]["type"], json!("local"));
+        assert!(config["mcp"]["tilth"]["command"].is_array());
     }
 }

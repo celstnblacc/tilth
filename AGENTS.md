@@ -1,3 +1,4 @@
+<!-- generated from prompts/mcp-base.md + prompts/mcp-edit.md by scripts/regen-agents-md.sh — do not edit directly -->
 tilth — code intelligence MCP server. Replaces grep, cat, find, ls with AST-aware equivalents.
 
 To explore code, always search first. tilth_search finds definitions, usages, and file locations in one call.
@@ -7,10 +8,11 @@ DO NOT use Read if content is already shown in expanded search results.
 DO NOT use Grep, Read, or Glob. Always use the better tools tilth_search (grep), tilth_read (read), tilth_files (glob).
 
 tilth_search: Search code — finds definitions, usages, and text. Replaces grep/rg for all code search.
-Comma-separated symbols for multi-symbol lookup (max 5).
+For multi-symbol lookup, separate each with a comma "symbol1,symbol2" (max 5).
 kind: "symbol" (default) | "content" (strings/comments) | "callers" (call sites)
 expand (default 2): inline full source for top matches.
 context: path to file being edited — boosts nearby results.
+glob: file pattern filter — "*.rs" (whitelist), "!*.test.ts" (exclude).
 Output per match:
 ## <path>:<start>-<end> [definition|usage|impl]
 <outline context>
@@ -24,33 +26,59 @@ Re-expanding a previously shown definition returns [shown earlier].
 tilth_read: Read file content with smart outlining. Replaces cat/head/tail.
 Small files → full content. Large files → structural outline.
 section: "<start>-<end>" or "<heading text>"
+sections: array of ranges/headings — multiple slices from the same file in one call.
 paths: read multiple files in one call.
 Output:
 <line_number> │ <content>                  ← full/section mode
 [<start>-<end>]  <symbol name>             ← outline mode
 
 tilth_files: Find files by glob pattern. Replaces find, ls, pwd, and the host Glob tool.
-Output: <path>  (~<token_count> tokens). Respects .gitignore.
+patterns: run multiple globs in one call (e.g. patterns: ["*.rs", "*.toml"]).
+Output: <path>  (~<token_count> tokens).
 
 tilth_deps: Blast-radius check — what imports this file and what it imports.
 Use ONLY before renaming, removing, or changing an export's signature.
 
+tilth_grok: Everything structural about a symbol in one call — def + body + signature + doc + callees + callers + siblings + tests.
+Usage: tilth_grok(target: "parse_unified_diff"). Also accepts "src/file.rs:7" or "Type::method".
+scope: narrow when the name is ambiguous. full: widen caps from 5/5/8/8 to 50/30/30/30.
+Use ONLY for "understand this symbol" questions — replaces the search → expand → callers chain.
+DO NOT use for concept search (use tilth_search) or reading file contents (use tilth_read).
+
+tilth_diff: Structural diff — shows what changed at function level. Replaces Bash(git diff).
+Usage: tilth_diff(source: "HEAD~1") for last commit. No args = uncommitted changes.
+scope: "file.rs" or "file.rs:fn_name". log: "HEAD~5..HEAD" for per-commit summaries.
+search: filter to lines matching a term. blast: true to show callers of changed signatures.
+Output: [+] added, [-] deleted, [~] body changed, [~:sig] signature changed.
+DO NOT use Bash(git diff) or Bash(git log --patch). Use tilth_diff instead.
+
 To search code, use tilth_search instead of Grep or Bash(grep/rg).
 To read files, use tilth_read instead of Read or Bash(cat).
 To find files, use tilth_files instead of Glob or Bash(find/ls).
+To check what changed, use tilth_diff instead of Bash(git diff/git log).
 DO NOT re-read files already shown in expanded search results.
 
-tilth_edit: Edit files using hash-anchored lines. Replaces the host Edit tool.
-tilth_read → copy anchors (<line>:<hash>) → pass to tilth_edit.
+tilth_write: Batch write one or more files. Replaces the host Edit and Write tools.
+Three per-file modes: hash (default — replace lines at hash anchors), overwrite (whole file), append (add to end). Mode aliases: h=hash, w=overwrite, a=append.
+ALWAYS group writes to multiple files into ONE tilth_write call (max 20 files). Never call tilth_write twice in a row.
+Each file path may appear at most once per call.
+hash mode — edit an existing file:
+tilth_read → copy anchors (<line>:<hash>) (BOTH line and hash required) → pass to tilth_write.
+tilth_search does NOT provide hashes — you MUST tilth_read the file or section first.
+Shape: {"files": [{"path": "a.rs", "edits": [{"start": "<line>:<hash>", "content": "<new code>"}]}]}
 Single line: {"start": "<line>:<hash>", "content": "<new code>"}
-Range: {"start": "<line>:<hash>", "end": "<line>:<hash>", "content": "..."}
-Delete: {"start": "<line>:<hash>", "content": ""}
-Hash mismatch → file changed, re-read and retry.
+Range:       {"start": "<line>:<hash>", "end": "<line>:<hash>", "content": "..."}
+Delete:      {"start": "<line>:<hash>", "content": ""}
+Hash mismatch → file changed, re-read THAT file and retry it (other files in the batch already applied).
+A parse error on one edit invalidates ALL edits for that file (none applied); retry the whole file's edits after fixing the malformed entry.
+overwrite mode — create a file, or replace one whole:
+{"path": "new.rs", "mode": "overwrite", "content": "<full file body>"}
+Create-only by default — fails if the file exists. Pass "overwrite": true to replace an existing file.
+append mode — add to the end, creating the file if absent:
+{"path": "log.txt", "mode": "append", "content": "<text to append>"}
+Per-file results: each file is processed independently. A failure on one file does NOT block the others.
+isError is false whenever ≥1 file succeeded — always scan the per-file `## <path>` sections for failures rather than trusting the top-level status.
 Large files: tilth_read shows outline — use section to get hashlined content.
-Pass diff: true to see a compact before/after diff in the response.
-After editing a function signature, tilth_edit shows callers that may need updating.
-DO NOT use the host Edit tool. Use tilth_edit for all edits.
-
-## Strict Installation Decoupling
-
-Once installed (e.g., to ~/.local/bin), the project binary must NEVER depend on the local repository path for execution, configuration, or data. All paths must be relative to the installation root or use standard system config paths (~/.config).
+Pass diff: true to see a compact before/after diff per file.
+After editing a function signature, tilth_write shows callers that may need updating.
+DO NOT use the host Edit or Write tool. Use tilth_write for all writes.

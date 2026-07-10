@@ -4,6 +4,19 @@ All notable changes to tilth will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
+## [Unreleased] — celstnblacc/tilth fork sync (v0.6.1 to v0.9.0)
+
+### Added
+- **pager_guard:** ported this fork's P-2 pager-injection guard (`validate_pager`, from the deleted `security.rs`) as `src/pager_guard.rs`, wired into `main.rs`'s `emit_output()`. Upstream still spawned `$PAGER` completely unvalidated.
+- `.cargo/config.toml`: fixed pre-existing test-suite environment fragility (same class of bug found in the rtk sync, unrelated to this diff) — `RUST_TEST_THREADS=1` + `GIT_CONFIG_GLOBAL=/dev/null` (test fixtures in `diff/mod.rs` commit directly to throwaway repos, silently blocked by a global `core.hookspath` branch-protection guard) + a `[target.*] runner` stripping `GIT_DIR`/`GIT_INDEX_FILE` (leaked into the test binary when `cargo test` runs from inside a git hook).
+
+### Removed
+- Deleted 6 orphaned pre-sync files superseded by upstream's restructuring but left behind by the tree merge (checkout only overwrites paths present in the target, doesn't delete paths absent from it): `src/mcp.rs` (now `src/mcp/mod.rs`, was a genuine module-path conflict blocking compilation), `src/security.rs` (P-1 guard superseded by `mcp::tools`'s newer containment system; P-2 ported standalone above), `src/index/symbol.rs`, `src/read/binary.rs`, `src/read/generated.rs`, `src/search/treesitter.rs`.
+
+### Deferred
+- `src/doctor.rs` (fork's v0.8.0 `tilth doctor` redesign, commit `c5a4036`) — its dependencies (`check_registration`, `TrustLevel` from `install.rs`) don't exist on this tree at all; `install.rs` was substantially rewritten upstream. Bigger adaptation than this security-focused sync pass scopes to.
+- The P-1 path-traversal guard from the old `security.rs` — upstream's `mcp::tools` containment system (`resolve_scope`/`path_within_scope`) is more comprehensive and has its own test coverage (`refuses_write_outside_scope`, `refuses_hash_write_outside_scope`) for the same threat model.
+
 ## [Unreleased]
 
 ### Changed

@@ -9,8 +9,6 @@ Records token usage, cost, correctness, and tool usage to JSONL format.
 import argparse
 import json
 import os
-from functools import lru_cache
-import tempfile
 import subprocess
 import sys
 import time
@@ -31,35 +29,18 @@ from config import (
     SYNTHETIC_REPO,
     RESULTS_DIR,
     DEFAULT_REPS,
-    codex_mcp_args,
-    resolve_tilth_bin,
-    TILTH_MCP_CONFIG,
+    TILTH_MCP_CODEX_ARGS,
 )
 from parse import parse_stream_json, parse_codex_json, tool_call_counts
 from tasks import TASKS
 from fixtures.reset import reset_repo, ensure_repo_clean
 
 
-@lru_cache(maxsize=1)
-def _portable_tilth_mcp_config() -> str:
-    """Materialize a temporary MCP config with the resolved tilth binary."""
-    with open(TILTH_MCP_CONFIG, "r", encoding="utf-8") as handle:
-        data = json.load(handle)
-
-    data.setdefault("mcpServers", {}).setdefault("tilth", {})["command"] = resolve_tilth_bin()
-
-    tmp = tempfile.NamedTemporaryFile("w", suffix=".json", delete=False, encoding="utf-8")
-    with tmp:
-        json.dump(data, tmp, indent=2)
-        tmp.write("\n")
-    return tmp.name
-
-
 def _tilth_version() -> Optional[str]:
     """Get installed tilth version via `tilth --version`."""
     try:
         result = subprocess.run(
-            [resolve_tilth_bin(), "--version"],
+            [str(Path.home() / ".cargo" / "bin" / "tilth"), "--version"],
             capture_output=True, text=True, timeout=5,
         )
         # Output: "tilth 0.2.1"
@@ -135,7 +116,7 @@ def run_single(
 
         # Add MCP config for tilth modes
         if mode.mcp_config_path:
-            cmd += codex_mcp_args()
+            cmd += TILTH_MCP_CODEX_ARGS
 
         # Codex has no --system-prompt, prepend to prompt
         full_prompt = f"{SYSTEM_PROMPT}\n\n{task.prompt}"
@@ -151,14 +132,14 @@ def run_single(
             "--no-session-persistence",
             "--dangerously-skip-permissions",
             "--strict-mcp-config",
-            "--system-prompt", SYSTEM_PROMPT,
+            "--system-prompt", SYSTEM_PROMPT + f"\nYour current working directory is: {repo_path}",
         ]
 
         if mode.tools:
             cmd += ["--tools", ",".join(mode.tools)]
 
         if mode.mcp_config_path:
-            cmd += ["--mcp-config", _portable_tilth_mcp_config()]
+            cmd += ["--mcp-config", mode.mcp_config_path]
 
         cmd += ["--", task.prompt]
 
@@ -342,7 +323,7 @@ Examples:
     # Clean real-world repos before starting (removes junk files from previous runs)
     for repo_name in selected_repos:
         repo_path = REPOS[repo_name].path
-        ensure_repo_clean(repo_path)
+        ensure_repo_clean(repo_path, REPOS[repo_name].commit_sha)
         if args.verbose:
             print(f"Cleaned repo: {repo_name}")
 
@@ -388,8 +369,8 @@ Examples:
                         current_run += 1
                         run_id = f"{task_name}/{mode_name}/{model_name}/rep{rep}"
 
-                        # Reset repo and apply mutations for edit tasks
-                        if task.task_type == "edit":
+                        # Reset repo and apply mutations for tasks that have them
+                        if task.mutations:
                             repo_path = get_repo_path(task.repo)
                             if task.repo == "synthetic":
                                 if rep > 0 or mode_name != prev_mode or task_name != prev_task:
@@ -400,7 +381,7 @@ Examples:
                                 # Real repos: always clean + re-mutate before each run
                                 if args.verbose:
                                     print(f"  Resetting {task.repo}...")
-                                ensure_repo_clean(repo_path)
+                                ensure_repo_clean(repo_path, REPOS[task.repo].commit_sha)
                             # Apply mutations (if any) after clean state
                             if task.mutations:
                                 if args.verbose:
@@ -477,7 +458,7 @@ Examples:
     # Clean real-world repos after run (remove junk files written by Claude sessions)
     for repo_name in selected_repos:
         repo_path = REPOS[repo_name].path
-        ensure_repo_clean(repo_path)
+        ensure_repo_clean(repo_path, REPOS[repo_name].commit_sha)
 
     # Print summary
     print()

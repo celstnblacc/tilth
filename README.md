@@ -1,21 +1,6 @@
 # tilth
 
-## This Fork
-
-**Upstream:** [jahala/tilth](https://github.com/jahala/tilth) — forked as [celstnblacc/tilth](https://github.com/celstnblacc/tilth) for use in the [token-diet](https://github.com/celstnblacc/token-diet) stack.
-
-**Why we forked:** tilth is an MCP server — it runs inside the agent's tool loop and has direct filesystem access. Upstream shipped with no path boundary enforcement on MCP tool calls, meaning a prompt-injected path like `../../../../etc/passwd` would be read and returned to the model. We also found a command injection vector via `$PAGER`.
-
-**Security fixes applied (v0.5.7+):**
-
-| Severity | ID | Fix |
-|----------|----|-----|
-| HIGH | P-1 | **Path traversal in `tool_read` / `tool_edit`** — MCP tool paths were not validated against the project root. An MCP client could pass `../../../etc/passwd` or any absolute path to read or overwrite files anywhere on disk. Added `security::validate_path_mcp()` using `canonicalize()` + prefix check. Integrated at all three MCP entry points (`tool_read` single, `tool_read` batch, `tool_edit`). |
-| MEDIUM | P-2 | **Command injection via `$PAGER`** — `emit_output()` passed the `$PAGER` env var directly to `Command::new()`. A malicious `$PAGER=less; rm -rf /` would execute both commands. Added `security::validate_pager()` with an allow-list of safe pager names + shell metacharacter filter. Falls back to `less` on invalid input. |
-
-New module: `src/security.rs` with 13 tests. Run `cargo test --all` to verify.
-
----
+[![OpenSSF Scorecard](https://api.scorecard.dev/projects/github.com/jahala/tilth/badge)](https://scorecard.dev/viewer/?uri=github.com/jahala/tilth)
 
 **Smart code reading for humans and AI agents.** Reduces cost per correct answer by **44%** on Sonnet, **39%** on Opus, and **38%** on Haiku across 160 benchmark runs. ([benchmarks](#benchmarks))
 
@@ -37,8 +22,8 @@ $ tilth src/auth.ts
 Small files come back whole. Large files get an outline. Drill in with `--section`:
 
 ```bash
-$ tilth src/auth.ts --section 44-89
-$ tilth docs/guide.md --section "## Installation"
+tilth src/auth.ts --section 44-89
+tilth docs/guide.md --section "## Installation"
 ```
 
 ## Search finds definitions first
@@ -70,12 +55,23 @@ Tree-sitter finds where symbols are **defined** — not just where strings appea
 
 Expanded definitions include a **callee footer** (`── calls ──`) showing resolved callees with file, line range, and signature — the agent can follow call chains without separate searches for each callee.
 
+### Expanded search
+
+CLI search returns compact results by default. Use `--expand` to inline source for the top matches:
+
+```bash
+tilth handleAuth --scope src/ --expand       # top 2 (default when flag is bare)
+tilth handleAuth --scope src/ --expand=5     # top 5
+```
+
+In MCP mode, `expand` defaults to 2 — no flag needed.
+
 ### Multi-symbol search
 
 Trace across files in one call:
 
 ```bash
-$ tilth "ServeHTTP, HandlersChain, Next" --scope .
+tilth "ServeHTTP, HandlersChain, Next" --scope .
 ```
 
 Each symbol gets its own result block with definitions and expansions. The expand budget is shared — at least one expansion per symbol, deduped across files.
@@ -85,16 +81,76 @@ Each symbol gets its own result block with definitions and expansions. The expan
 Find all call sites of a symbol using structural tree-sitter matching (not text search):
 
 ```bash
-$ tilth isTrustedProxy --kind callers --scope .
+$ tilth isTrustedProxy --callers --scope .
 # Callers of "isTrustedProxy" — 5 call sites
 
 ## context.go:1011 [caller: ClientIP]
 → trusted = c.engine.isTrustedProxy(remoteIP)
 ```
 
+In MCP mode, use `kind: "callers"` on `tilth_search` instead.
+
+### Blast-radius deps
+
+See what a file imports and what depends on it — useful before renaming or changing exports:
+
+```bash
+$ tilth src/auth.ts --deps
+# deps: src/auth.ts
+
+## Imports (3)
+  jsonwebtoken      (external)
+  @/config          src/config.ts
+  express           (external)
+
+## Dependents (4)
+  src/routes/api.ts        uses: handleAuth, AuthManager
+  src/middleware/cors.ts   uses: validateToken
+  src/app.ts               uses: AuthManager
+  test/auth.test.ts        uses: handleAuth, AuthManager
+```
+
+In MCP mode, use the `tilth_deps` tool.
+
+### Grok a symbol
+
+Everything about one symbol in a single call — definition, signature, doc, callers, callees, siblings, tests:
+
+```bash
+$ tilth grok handleAuth
+# grok: handleAuth [src/auth.ts:42]
+
+## signature
+function handleAuth(req: Request): AuthContext
+
+## callers (3)
+  src/routes/api.ts:88   in registerRoutes()
+  src/app.ts:24          in bootstrap()
+
+## callees (2)
+  validateToken    src/auth.ts:120
+  loadUser         src/db/users.ts:55
+```
+
+In MCP mode, use the `tilth_grok` tool.
+
 ### Session dedup
 
 In MCP mode, previously expanded definitions show `[shown earlier]` instead of the full body on subsequent searches. Saves tokens when the agent revisits symbols it already saw.
+
+## Structural diff
+
+```bash
+$ tilth diff HEAD~1
+# Diff: HEAD~1 — 3 files, 2 modified, 1 added (~350 tokens)
+
+## src/auth.rs (3 symbols)
+  [~:sig]  fn handleAuth(req) → (req, ctx)    L42
+  [~]      fn validate_session                 L88
+  [+]      fn refresh_token                    L120
+```
+
+Function-level change detection. Drill in with `--scope`, summarize history with `--log`, detect merge conflicts automatically. Replaces `git diff` for AI agents.
 
 ## Benchmarks
 
@@ -137,7 +193,7 @@ tilth install cursor           # ~/.cursor/mcp.json
 tilth install windsurf         # ~/.codeium/windsurf/mcp_config.json
 tilth install vscode           # .vscode/mcp.json (project scope)
 tilth install claude-desktop
-tilth install opencode         # ~/.opencode.json
+tilth install opencode         # ~/.config/opencode/opencode.json
 tilth install gemini           # ~/.gemini/settings.json
 tilth install codex            # ~/.codex/config.toml
 tilth install amp              # ~/.config/amp/settings.json
@@ -162,7 +218,7 @@ Add `--edit` to enable hash-anchored file editing (see [Edit mode](#edit-mode)):
 tilth install claude-code --edit
 ```
 
-Or call it from bash — see [AGENTS.md](./AGENTS.md) for the agent prompt.
+Or call it from bash — see [AGENTS.md](./AGENTS.md) for the MCP agent prompt, or [skills/SKILL.md](./skills/SKILL.md) for a Claude Code skill prompt.
 
 ### Smaller models
 
@@ -188,21 +244,25 @@ Token-based, not line-based — a 1-line minified bundle gets outlined; a 120-li
 
 ## Edit mode
 
-Install with `--edit` to add `tilth_edit` and switch `tilth_read` to hashline output:
+Install with `--edit` to add `tilth_write` and switch `tilth_read` to hashline output:
 
 ```
 42:a3f|  let x = compute();
 43:f1b|  return x;
 ```
 
-`tilth_edit` uses these hashes as anchors. If the file changed since the last read, hashes won't match and the edit is rejected with current content shown:
+`tilth_write` batches one or more files, each in one of three modes: `hash` (default — replace lines at the hash anchors above), `overwrite` (whole file; create-only unless `overwrite: true`), and `append`. In hash mode the anchors must match the last read; if the file changed since, hashes won't match and the edit is rejected with current content shown:
 
 ```json
 {
-  "path": "src/auth.ts",
-  "edits": [
-    { "start": "42:a3f", "content": "  let x = recompute();" },
-    { "start": "44:b2c", "end": "46:e1d", "content": "" }
+  "files": [
+    {
+      "path": "src/auth.ts",
+      "edits": [
+        { "start": "42:a3f", "content": "  let x = recompute();" },
+        { "start": "44:b2c", "end": "46:e1d", "content": "" }
+      ]
+    }
   ]
 }
 ```
@@ -219,9 +279,13 @@ tilth <path> --section 45-89      # exact line range
 tilth <path> --section "## Foo"   # markdown heading
 tilth <path> --full               # force full content
 tilth <symbol> --scope <dir>      # definitions + usages
+tilth <symbol> --expand=5         # inline source for top 5 matches
+tilth <symbol> --callers          # find call sites (structural)
+tilth <path> --deps               # imports + dependents
 tilth "TODO: fix" --scope <dir>   # content search
 tilth "/<regex>/" --scope <dir>   # regex search
 tilth "*.test.ts" --scope <dir>   # glob files
+tilth diff HEAD~1                 # structural diff (function-level)
 tilth --map --scope <dir>         # codebase skeleton (CLI only)
 ```
 
@@ -244,7 +308,7 @@ Search, content search, and glob use early termination — time is roughly const
 
 ## What's inside
 
-Rust. ~8,000 lines. No runtime dependencies.
+Rust. ~20,000 lines. No runtime dependencies.
 
 - **tree-sitter** — AST parsing for 14 languages (Rust, TypeScript, TSX, JavaScript, Python, Go, Java, Scala, C, C++, Ruby, PHP, C#, Swift). Used for definition detection, callee extraction, callers query, and structural outlines.
 - **ripgrep internals** (`grep-regex`, `grep-searcher`) — fast content search

@@ -1,0 +1,36 @@
+[env]
+# src/diff/mod.rs's tests serialize CWD mutation against each other via a
+# module-local CWD_LOCK mutex, but src/edit.rs's tests also mutate the
+# process-wide CWD (see comments at edit.rs:336, edit.rs:1064) without
+# using that same lock -- the two modules' tests can still race under the
+# default parallel runner, producing "No changes." on diff tests that
+# expect real content (the CWD got yanked out from under them mid-test).
+#
+# Force single-threaded test execution until this is fixed properly
+# (shared lock, or drop set_current_dir in favor of passing an explicit
+# working directory everywhere). Verified: full suite passes clean at
+# --test-threads=1, fails ~13 tests intermittently at the default thread
+# count. Pre-existing in upstream's own test suite, unrelated to this
+# fork's changes.
+RUST_TEST_THREADS = "1"
+
+# src/diff/mod.rs's tests create throwaway `git init` repos and commit
+# directly to them, assuming a vanilla git environment. On a machine with
+# a global core.hookspath (pre-commit guards installed repo-wide, e.g. one
+# that blocks direct commits to main/master), those throwaway commits
+# silently fail (the test's `git()` helper doesn't check exit codes),
+# leaving the fixture repo with zero commits -- cascading into
+# "No changes." and similar wrong results across every diff test.
+GIT_CONFIG_GLOBAL = "/dev/null"
+
+[target.'cfg(all())']
+# When `cargo test` runs from inside a git hook (e.g. this repo's own
+# pre-commit hook), git has already set GIT_DIR / GIT_WORK_TREE /
+# GIT_INDEX_FILE in the hook's environment, pointing at the outer repo
+# being committed. The test fixtures above inherit those vars, and git's
+# explicit GIT_DIR override takes precedence over a fixture's own
+# `.current_dir()`/`git init` in a tempdir, silently redirecting "isolated"
+# git operations onto the real outer repo. `[env]` above can only set
+# variables, not unset inherited ones, so strip them at the point the
+# compiled test binary is actually invoked.
+runner = "env -u GIT_DIR -u GIT_WORK_TREE -u GIT_INDEX_FILE -u GIT_PREFIX --"

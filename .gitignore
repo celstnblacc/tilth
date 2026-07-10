@@ -29,11 +29,5 @@ benchmark/results/*.jsonl
 benchmark/results/*.md
 !benchmark/results/.gitkeep
 
-# Secrets
-.env
-*.env.*
-*.key
-*.pem
-*.p12
-credentials.*
-.serena/
+# ShipGuard SAST scanner local runtime state
+.shipguard/

@@ -6,12 +6,11 @@ use std::fmt::Write as _;
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use crate::cache::OutlineCache;
 use crate::error::TilthError;
-use crate::read::detect_file_type;
+use crate::lang::detect_file_type;
+use crate::lang::outline::{extract_import_source, get_outline_entries};
 use crate::read::imports::{is_external, is_import_line, resolve_related_files_with_content};
-use crate::read::outline::code::extract_import_source;
-use crate::search::callees::{extract_callee_names, get_outline_entries, resolve_callees};
+use crate::search::callees::{extract_callee_names, resolve_callees};
 use crate::search::callers::find_callers_batch;
 use crate::types::{FileType, OutlineKind};
 
@@ -56,7 +55,6 @@ pub struct Dependent {
 pub fn analyze_deps(
     path: &Path,
     scope: &Path,
-    cache: &OutlineCache,
     bloom: &crate::index::bloom::BloomFilterCache,
 ) -> Result<DepsResult, TilthError> {
     // Canonicalize for reliable path comparison (callers return absolute paths).
@@ -86,7 +84,6 @@ pub fn analyze_deps(
     // ── Phase 1: Extract exported symbols ────────────────────────────────────
 
     let entries = get_outline_entries(&content, lang);
-    let _ = cache; // available for future caching
 
     let mut all_names: Vec<String> = Vec::new();
     for entry in &entries {
@@ -119,7 +116,7 @@ pub fn analyze_deps(
 
     // Local deps via callee resolution
     let callee_names = extract_callee_names(&content, lang, None);
-    let resolved = resolve_callees(&callee_names, path, &content, cache, bloom);
+    let resolved = resolve_callees(&callee_names, path, &content, bloom);
 
     // Group resolved callees by file
     let mut local_by_file: HashMap<PathBuf, Vec<String>> = HashMap::new();
@@ -159,7 +156,7 @@ pub fn analyze_deps(
         if !is_import_line(line, lang) {
             continue;
         }
-        let source = extract_import_source(line);
+        let source = extract_import_source(line, Some(lang));
         if source.is_empty() {
             continue;
         }
@@ -175,7 +172,13 @@ pub fn analyze_deps(
 
     let mut used_by = if searched_count > 0 {
         let symbols_set: HashSet<String> = all_names.iter().cloned().collect();
-        let raw_matches = find_callers_batch(&symbols_set, scope, bloom)?;
+        let raw_matches = find_callers_batch(
+            &symbols_set,
+            scope,
+            bloom,
+            None,
+            crate::search::callers::BATCH_EARLY_QUIT,
+        )?;
 
         // Group by file path
         let mut by_file: HashMap<PathBuf, Vec<(String, String, u32)>> = HashMap::new();

@@ -4,7 +4,7 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use crate::read::detect_file_type;
+use crate::lang::detect_file_type;
 use crate::types::{FileType, Lang};
 
 const MAX_SUGGESTIONS: usize = 8;
@@ -36,7 +36,7 @@ pub fn resolve_related_files_with_content(file_path: &Path, content: &str) -> Ve
         if !is_import_line(line, lang) {
             continue;
         }
-        let source = super::outline::code::extract_import_source(line);
+        let source = crate::lang::outline::extract_import_source(line, Some(lang));
         if source.is_empty() || is_external(&source, lang) {
             continue;
         }
@@ -59,6 +59,12 @@ pub(crate) fn is_import_line(line: &str, lang: Lang) -> bool {
         Lang::Python => trimmed.starts_with("import ") || trimmed.starts_with("from "),
         Lang::Go | Lang::Java | Lang::Scala | Lang::Kotlin => trimmed.starts_with("import "),
         Lang::C | Lang::Cpp => trimmed.starts_with("#include"),
+        Lang::Elixir => {
+            trimmed.starts_with("alias ")
+                || trimmed.starts_with("import ")
+                || trimmed.starts_with("use ")
+                || trimmed.starts_with("require ")
+        }
         _ => false,
     }
 }
@@ -75,19 +81,48 @@ pub(crate) fn is_external(source: &str, lang: Lang) -> bool {
         }
         Lang::Python => !source.starts_with('.'),
         Lang::C | Lang::Cpp => !source.starts_with('"'),
-        // Go, Java, Scala, Kotlin — can't resolve without build system knowledge.
+        // Elixir, Go, Java, Scala, Kotlin — can't resolve without build system knowledge.
         _ => true,
     }
 }
 
 fn resolve(dir: &Path, source: &str, lang: Lang) -> Option<PathBuf> {
-    match lang {
+    let raw = match lang {
         Lang::Rust => resolve_rust(dir, source),
         Lang::TypeScript | Lang::Tsx | Lang::JavaScript => resolve_js(dir, source),
         Lang::Python => resolve_python(dir, source),
         Lang::C | Lang::Cpp => resolve_c_include(dir, source),
+        // Elixir, Go, Java, etc. — module-to-file mapping requires build system conventions.
         _ => None,
+    };
+    raw.map(|p| normalize_path(&p))
+}
+
+/// Lexically collapse `.` and `..` components without touching the filesystem.
+/// `dir.join("../foo")` returns a `PathBuf` containing literal `..`; without this,
+/// distinct spellings of the same target file produce distinct `PathBuf`s and
+/// downstream callers (dedup loops, `HashMap` keys) treat them as different files.
+fn normalize_path(path: &Path) -> PathBuf {
+    use std::path::Component;
+    let mut out = PathBuf::new();
+    for comp in path.components() {
+        match comp {
+            Component::CurDir => {}
+            Component::ParentDir => {
+                let pop_ok = matches!(
+                    out.components().next_back(),
+                    Some(Component::Normal(_) | Component::Prefix(_))
+                );
+                if pop_ok {
+                    out.pop();
+                } else {
+                    out.push(comp);
+                }
+            }
+            _ => out.push(comp),
+        }
     }
+    out
 }
 
 // --- Rust ---
@@ -205,5 +240,71 @@ fn resolve_c_include(dir: &Path, source: &str) -> Option<PathBuf> {
         Some(candidate)
     } else {
         None
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::fs;
+
+    #[test]
+    fn normalize_collapses_dot_and_parent_components() {
+        let p = Path::new("temporal/workflows/../utils/activityProxies.ts");
+        assert_eq!(
+            normalize_path(p),
+            PathBuf::from("temporal/utils/activityProxies.ts")
+        );
+        let p = Path::new("app/db/./db.ts");
+        assert_eq!(normalize_path(p), PathBuf::from("app/db/db.ts"));
+    }
+
+    #[test]
+    fn normalize_preserves_leading_parent_when_unresolvable() {
+        // No prior Normal component to pop, so ".." is kept.
+        let p = Path::new("../outside.ts");
+        assert_eq!(normalize_path(p), PathBuf::from("../outside.ts"));
+    }
+
+    #[test]
+    fn js_resolve_returns_normalized_path_for_parent_import() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+        fs::create_dir_all(root.join("temporal/workflows")).unwrap();
+        fs::create_dir_all(root.join("temporal/utils")).unwrap();
+        fs::write(root.join("temporal/utils/activityProxies.ts"), "").unwrap();
+
+        let resolved = resolve_js(&root.join("temporal/workflows"), "../utils/activityProxies")
+            .expect("should resolve");
+        let normalized = normalize_path(&resolved);
+        assert_eq!(normalized, root.join("temporal/utils/activityProxies.ts"));
+        // No "../" component should survive normalization.
+        assert!(
+            !normalized
+                .components()
+                .any(|c| matches!(c, std::path::Component::ParentDir)),
+            "normalized path still contains '..': {normalized:?}"
+        );
+    }
+
+    #[test]
+    fn js_resolve_dedups_different_spellings_of_same_file() {
+        // Two importers of the same file via different relative paths must
+        // produce the same PathBuf so that hot-file counting aggregates them.
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+        fs::create_dir_all(root.join("a/b")).unwrap();
+        fs::create_dir_all(root.join("a/c")).unwrap();
+        fs::write(root.join("a/b/target.ts"), "").unwrap();
+
+        let from_sibling =
+            resolve(&root.join("a/b"), "./target", Lang::TypeScript).expect("sibling");
+        let from_cousin =
+            resolve(&root.join("a/c"), "../b/target", Lang::TypeScript).expect("cousin");
+
+        assert_eq!(
+            from_sibling, from_cousin,
+            "different spellings should normalize to the same PathBuf"
+        );
     }
 }

@@ -7,127 +7,14 @@
 //! Identifier extraction uses a simple byte-level state machine -- no
 //! tree-sitter needed -- making it fast enough to run on every uncached file.
 
-use std::collections::hash_map::DefaultHasher;
-use std::hash::{Hash, Hasher};
 use std::path::{Path, PathBuf};
 use std::time::SystemTime;
 
 use dashmap::DashMap;
+use fastbloom::BloomFilter;
 
-// ---------------------------------------------------------------------------
-// BloomFilter
-// ---------------------------------------------------------------------------
-
-/// A probabilistic set membership data structure.
-///
-/// Supports `insert` and `contains`. `contains` may return false positives
-/// but never false negatives: if it returns `false`, the item is definitely
-/// absent.
-pub struct BloomFilter {
-    bits: Vec<u64>,
-    num_hashes: u8,
-    num_bits: usize,
-}
-
-impl BloomFilter {
-    /// Create a new Bloom filter sized for `expected_items` with the given
-    /// target false-positive rate.
-    ///
-    /// # Panics
-    ///
-    /// Panics if `expected_items` is 0 or `target_fpr` is not in (0, 1).
-    ///
-    /// # Examples
-    ///
-    /// ```
-    /// use tilth::index::bloom::BloomFilter;
-    ///
-    /// let bf = BloomFilter::new(100, 0.01);
-    /// assert!(!bf.contains("hello"));
-    /// ```
-    #[must_use]
-    #[allow(clippy::cast_precision_loss)] // expected_items fits in f64 mantissa for practical sizes
-    pub fn new(expected_items: usize, target_fpr: f64) -> Self {
-        assert!(expected_items > 0, "expected_items must be > 0");
-        assert!(
-            target_fpr > 0.0 && target_fpr < 1.0,
-            "target_fpr must be in (0, 1)"
-        );
-
-        let n = expected_items as f64;
-        let ln2 = std::f64::consts::LN_2;
-
-        // Optimal number of bits: m = -(n * ln(p)) / (ln(2)^2)
-        let m = (-(n * target_fpr.ln()) / (ln2 * ln2)).ceil() as usize;
-        let m = m.max(64); // minimum 1 word
-
-        // Optimal number of hash functions: k = (m/n) * ln(2)
-        #[allow(clippy::cast_precision_loss)]
-        let k = ((m as f64 / n) * ln2).ceil() as u8;
-        let k = k.clamp(1, 32);
-
-        // Round up to full u64 words
-        let num_words = m.div_ceil(64);
-        let num_bits = num_words * 64;
-
-        Self {
-            bits: vec![0u64; num_words],
-            num_hashes: k,
-            num_bits,
-        }
-    }
-
-    /// Insert an item into the filter.
-    pub fn insert(&mut self, item: &str) {
-        let (h1, h2) = double_hash(item);
-        for i in 0..u64::from(self.num_hashes) {
-            let idx = combined_hash(h1, h2, i, self.num_bits);
-            let word = idx / 64;
-            let bit = idx % 64;
-            self.bits[word] |= 1u64 << bit;
-        }
-    }
-
-    /// Check if an item is probably in the filter.
-    ///
-    /// Returns `true` if the item is PROBABLY present, `false` if it is
-    /// DEFINITELY absent.
-    #[must_use]
-    pub fn contains(&self, item: &str) -> bool {
-        let (h1, h2) = double_hash(item);
-        for i in 0..u64::from(self.num_hashes) {
-            let idx = combined_hash(h1, h2, i, self.num_bits);
-            let word = idx / 64;
-            let bit = idx % 64;
-            if self.bits[word] & (1u64 << bit) == 0 {
-                return false;
-            }
-        }
-        true
-    }
-}
-
-/// Compute two independent hashes for double-hashing.
-fn double_hash(item: &str) -> (u64, u64) {
-    let h1 = hash_with_seed(item, 0);
-    let h2 = hash_with_seed(item, 0x517c_c1b7_2722_0a95); // arbitrary non-zero seed
-    (h1, h2)
-}
-
-/// Combine h1 and h2 into the i-th hash value, mapped to `[0, num_bits)`.
-fn combined_hash(h1: u64, h2: u64, i: u64, num_bits: usize) -> usize {
-    // h(i) = h1 + i * h2 (mod num_bits)
-    let hash = h1.wrapping_add(i.wrapping_mul(h2));
-    (hash % num_bits as u64) as usize
-}
-
-/// Hash a string with a given seed using `DefaultHasher`.
-fn hash_with_seed(item: &str, seed: u64) -> u64 {
-    let mut hasher = DefaultHasher::new();
-    seed.hash(&mut hasher);
-    item.hash(&mut hasher);
-    hasher.finish()
-}
+use crate::lang::detect_file_type;
+use crate::types::{FileType, Lang};
 
 // ---------------------------------------------------------------------------
 // BloomFilterCache
@@ -172,20 +59,33 @@ impl BloomFilterCache {
         }
 
         // Cache miss or stale: build and cache a new filter
-        let filter = build_filter(content);
+        let filter = build_filter(content, code_lang(path));
         let result = filter.contains(symbol);
         self.filters.insert(path.to_path_buf(), (filter, mtime));
         result
     }
 }
 
+/// The source language of `path`, or `None` when it is not a known code file.
+fn code_lang(path: &Path) -> Option<Lang> {
+    match detect_file_type(path) {
+        FileType::Code(lang) => Some(lang),
+        FileType::Markdown
+        | FileType::StructuredData
+        | FileType::Tabular
+        | FileType::Log
+        | FileType::Other => None,
+    }
+}
+
 /// Build a Bloom filter from file content by extracting all identifiers.
-fn build_filter(content: &str) -> BloomFilter {
-    // Count identifiers first to size the filter appropriately.
-    let idents: Vec<&str> = extract_identifiers(content).collect();
+fn build_filter(content: &str, lang: Option<Lang>) -> BloomFilter {
+    let idents: Vec<&str> = extract_identifiers(content, lang).collect();
+    // Sized for total token count, not unique identifiers -- duplicates over-allocate
+    // the filter, so the achieved FPR is well below the 0.01 target in practice.
     let expected = idents.len().max(1);
 
-    let mut filter = BloomFilter::new(expected, 0.01);
+    let mut filter = BloomFilter::with_false_pos(0.01).expected_items(expected);
     for ident in idents {
         filter.insert(ident);
     }
@@ -203,12 +103,16 @@ fn build_filter(content: &str) -> BloomFilter {
 ///
 /// This is intentionally approximate -- it does not understand all language
 /// syntaxes perfectly, but is fast and good enough for Bloom filter population.
-fn extract_identifiers(content: &str) -> impl Iterator<Item = &str> {
-    IdentifierIter::new(content)
+///
+/// `lang` gates language-specific lexing: the Rust lifetime heuristic only
+/// applies when `lang` is `Some(Lang::Rust)`. For every other language a `'`
+/// opens a single-quoted string, matching their actual syntax.
+fn extract_identifiers(content: &str, lang: Option<Lang>) -> impl Iterator<Item = &str> {
+    IdentifierIter::new(content, lang)
 }
 
 /// States for the identifier extraction state machine.
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy)]
 enum ScanState {
     /// Normal code scanning.
     Code,
@@ -229,15 +133,17 @@ struct IdentifierIter<'a> {
     src: &'a str,
     pos: usize,
     state: ScanState,
+    lang: Option<Lang>,
 }
 
 impl<'a> IdentifierIter<'a> {
-    fn new(content: &'a str) -> Self {
+    fn new(content: &'a str, lang: Option<Lang>) -> Self {
         Self {
             bytes: content.as_bytes(),
             src: content,
             pos: 0,
             state: ScanState::Code,
+            lang,
         }
     }
 }
@@ -262,6 +168,25 @@ impl<'a> Iterator for IdentifierIter<'a> {
                         continue;
                     }
                     if b == b'\'' {
+                        // Distinguish a Rust lifetime (`'a`, `'static`) from a char
+                        // literal (`'a'`, `'\n'`). A char literal has a closing quote
+                        // right after a single char/escape; a lifetime is a tick
+                        // followed by an identifier with no closing quote. Treating a
+                        // lifetime as a string opener would swallow every following
+                        // identifier up to the next tick, dropping them from the filter
+                        // and producing a false negative (the one thing Bloom forbids).
+                        // Lifetimes are Rust-only; in other languages a `'` opens a
+                        // single-quoted string, so the heuristic is gated on
+                        // `has_lifetimes` to avoid swallowing identifiers after a
+                        // `'foo'` string there.
+                        let is_lifetime = self.lang.is_some_and(Lang::has_lifetimes)
+                            && i + 1 < len
+                            && is_ident_start(bytes[i + 1])
+                            && !(i + 2 < len && bytes[i + 2] == b'\'');
+                        if is_lifetime {
+                            self.pos += 1;
+                            continue;
+                        }
                         self.state = ScanState::StringSingle;
                         self.pos += 1;
                         continue;
@@ -375,7 +300,7 @@ mod tests {
 
     #[test]
     fn test_basic_membership() {
-        let mut bf = BloomFilter::new(100, 0.01);
+        let mut bf = BloomFilter::with_false_pos(0.01).expected_items(100);
         bf.insert("foo");
         bf.insert("bar");
         bf.insert("baz");
@@ -386,8 +311,47 @@ mod tests {
     }
 
     #[test]
+    fn extracts_identifiers_across_rust_lifetimes() {
+        let src = "fn longest<'a>(x: &'a str, y: &'a str) -> &'a str { x }";
+        let idents: Vec<&str> = extract_identifiers(src, Some(Lang::Rust)).collect();
+        for want in ["fn", "longest", "x", "y", "str"] {
+            assert!(
+                idents.contains(&want),
+                "lifetime tick swallowed identifier {want:?}; got {idents:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn char_literal_is_still_skipped() {
+        let src = "let c = 'a'; let d = '\\n'; fn target() {}";
+        let idents: Vec<&str> = extract_identifiers(src, Some(Lang::Rust)).collect();
+        assert!(idents.contains(&"target"), "got {idents:?}");
+        assert!(
+            !idents.contains(&"a"),
+            "char-literal body leaked: {idents:?}"
+        );
+    }
+
+    #[test]
+    fn non_rust_single_quote_string_does_not_swallow_following_idents() {
+        // In JS/Python/Ruby/PHP a `'...'` is a string, not a Rust lifetime. The
+        // lifetime heuristic must stay off for them: if it fired, the closing
+        // quote of `'foo'` would open a spurious string that swallows every
+        // identifier up to the next quote -- a Bloom false negative.
+        let src = "let x = 'foo'; bar();";
+        let idents: Vec<&str> = extract_identifiers(src, Some(Lang::JavaScript)).collect();
+        assert!(
+            idents.contains(&"bar"),
+            "closing quote opened a swallowing string: {idents:?}"
+        );
+        assert!(idents.contains(&"let"), "got {idents:?}");
+        assert!(idents.contains(&"x"), "got {idents:?}");
+    }
+
+    #[test]
     fn test_definitely_not_present() {
-        let mut bf = BloomFilter::new(10, 0.01);
+        let mut bf = BloomFilter::with_false_pos(0.01).expected_items(10);
         bf.insert("alpha");
         bf.insert("beta");
         bf.insert("gamma");
@@ -415,7 +379,7 @@ mod tests {
     #[test]
     fn test_false_positive_rate() {
         let n = 500;
-        let mut bf = BloomFilter::new(n, 0.01);
+        let mut bf = BloomFilter::with_false_pos(0.01).expected_items(n);
 
         // Insert N items
         for i in 0..n {
@@ -447,14 +411,14 @@ mod tests {
     #[test]
     fn test_identifier_extraction() {
         let code = "fn foo(bar: Baz) { qux() }";
-        let idents: Vec<&str> = extract_identifiers(code).collect();
+        let idents: Vec<&str> = extract_identifiers(code, Some(Lang::Rust)).collect();
         assert_eq!(idents, vec!["fn", "foo", "bar", "Baz", "qux"]);
     }
 
     #[test]
     fn test_identifier_extraction_skips_strings() {
         let code = r#"let x = "hello world"; let y = 42;"#;
-        let idents: Vec<&str> = extract_identifiers(code).collect();
+        let idents: Vec<&str> = extract_identifiers(code, Some(Lang::Rust)).collect();
         assert!(idents.contains(&"let"));
         assert!(idents.contains(&"x"));
         assert!(idents.contains(&"y"));
@@ -466,7 +430,7 @@ mod tests {
     #[test]
     fn test_identifier_extraction_skips_comments() {
         let code = "fn real() // fn fake()\n/* fn also_fake() */\nfn another()";
-        let idents: Vec<&str> = extract_identifiers(code).collect();
+        let idents: Vec<&str> = extract_identifiers(code, Some(Lang::Rust)).collect();
         assert!(idents.contains(&"real"));
         assert!(idents.contains(&"another"));
         assert!(!idents.contains(&"fake"));
@@ -476,7 +440,7 @@ mod tests {
     #[test]
     fn test_identifier_extraction_underscores_and_numbers() {
         let code = "_private __dunder var_123 _0 a1b2c3";
-        let idents: Vec<&str> = extract_identifiers(code).collect();
+        let idents: Vec<&str> = extract_identifiers(code, Some(Lang::Rust)).collect();
         assert_eq!(
             idents,
             vec!["_private", "__dunder", "var_123", "_0", "a1b2c3"]
@@ -485,13 +449,13 @@ mod tests {
 
     #[test]
     fn test_identifier_extraction_empty() {
-        let idents: Vec<&str> = extract_identifiers("").collect();
+        let idents: Vec<&str> = extract_identifiers("", Some(Lang::Rust)).collect();
         assert!(idents.is_empty());
     }
 
     #[test]
     fn test_identifier_extraction_no_identifiers() {
-        let idents: Vec<&str> = extract_identifiers("123 + 456 = 789").collect();
+        let idents: Vec<&str> = extract_identifiers("123 + 456 = 789", Some(Lang::Rust)).collect();
         assert!(idents.is_empty());
     }
 
@@ -520,20 +484,9 @@ mod tests {
     }
 
     #[test]
-    fn test_bloom_filter_sizing() {
-        // Verify the filter creates a reasonable number of bits
-        let bf = BloomFilter::new(100, 0.01);
-        // Optimal: ~960 bits (15 words). Allow some rounding.
-        assert!(bf.num_bits >= 896, "too few bits: {}", bf.num_bits);
-        assert!(bf.num_bits <= 1088, "too many bits: {}", bf.num_bits);
-        assert!(bf.num_hashes >= 5, "too few hashes: {}", bf.num_hashes);
-        assert!(bf.num_hashes <= 10, "too many hashes: {}", bf.num_hashes);
-    }
-
-    #[test]
     fn test_identifier_extraction_escaped_strings() {
         let code = r#"let s = "escaped \"quote\" inside"; let t = 1;"#;
-        let idents: Vec<&str> = extract_identifiers(code).collect();
+        let idents: Vec<&str> = extract_identifiers(code, Some(Lang::Rust)).collect();
         assert!(idents.contains(&"s"));
         assert!(idents.contains(&"t"));
         // "quote" and "inside" are inside the string -- should be skipped
@@ -544,7 +497,7 @@ mod tests {
     #[test]
     fn test_identifier_extraction_single_quotes() {
         let code = "let c = 'a'; let d = 'b';";
-        let idents: Vec<&str> = extract_identifiers(code).collect();
+        let idents: Vec<&str> = extract_identifiers(code, Some(Lang::Rust)).collect();
         assert!(idents.contains(&"let"));
         assert!(idents.contains(&"c"));
         assert!(idents.contains(&"d"));
@@ -553,7 +506,7 @@ mod tests {
     #[test]
     fn test_build_filter_integration() {
         let content = "pub fn search(query: &str) -> Vec<Match> { find(query) }";
-        let filter = build_filter(content);
+        let filter = build_filter(content, Some(Lang::Rust));
 
         assert!(filter.contains("search"));
         assert!(filter.contains("query"));

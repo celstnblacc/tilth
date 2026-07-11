@@ -20,6 +20,7 @@ pub(in crate::mcp) fn tool_definitions(edit_mode: bool) -> Vec<Value> {
     let mut tools = vec![
         serde_json::json!({
             "name": "tilth_search",
+            "annotations": { "readOnlyHint": true },
             "description": "Search for symbols, text, or regex patterns in code. Replaces grep/rg and the host Grep tool — use this for all code search. Symbol search returns definitions first (via tree-sitter AST), then usages, with full source code inlined for top matches. Content search finds literal text. Regex search supports full regex patterns. For cross-file tracing, pass comma-separated symbol names (max 5).",
             "inputSchema": {
                 "type": "object",
@@ -27,7 +28,7 @@ pub(in crate::mcp) fn tool_definitions(edit_mode: bool) -> Vec<Value> {
                 "properties": {
                     "query": {
                         "type": "string",
-                        "description": "Symbol name, text string, or regex pattern to search for. e.g. 'resolve_dependencies' or 'ServeHTTP,Next' for multi-symbol lookup."
+                        "description": "Symbol name, text string, or regex pattern to search for. e.g. 'resolve_dependencies' or 'ServeHTTP,Next' for comma-separated multi-symbol lookup (max 5)."
                     },
                     "scope": {
                         "type": "string",
@@ -55,19 +56,24 @@ pub(in crate::mcp) fn tool_definitions(edit_mode: bool) -> Vec<Value> {
                     "glob": {
                         "type": "string",
                         "description": "File pattern filter. Whitelist: \"*.rs\" (only Rust files). Exclude: \"!*.test.ts\" (skip test files). Brace expansion: \"*.{go,rs}\" (Go and Rust). Path patterns: \"src/**/*.ts\"."
+                    },
+                    "root": {
+                        "type": "string",
+                        "description": "Absolute project root; anchors relative paths and scopes. Required with any relative path/scope."
                     }
                 }
             }
         }),
         serde_json::json!({
             "name": "tilth_read",
+            "annotations": { "readOnlyHint": true },
             "description": read_desc,
             "inputSchema": {
                 "type": "object",
                 "properties": {
                     "path": {
                         "type": "string",
-                        "description": "Absolute or relative file path to read."
+                        "description": "Absolute or relative file path to read. A relative path requires an absolute `root`; the server cannot see your shell cwd."
                     },
                     "paths": {
                         "type": "array",
@@ -97,12 +103,17 @@ pub(in crate::mcp) fn tool_definitions(edit_mode: bool) -> Vec<Value> {
                     "budget": {
                         "type": "number",
                         "description": "Max tokens in response."
+                    },
+                    "root": {
+                        "type": "string",
+                        "description": "Absolute project root; anchors relative paths and scopes. Required with any relative path/scope."
                     }
                 }
             }
         }),
         serde_json::json!({
             "name": "tilth_files",
+            "annotations": { "readOnlyHint": true },
             "description": "Find files matching a glob pattern. Replaces find/ls/pwd and the host Glob tool — use this for all file discovery. Returns matched file paths sorted by relevance with token size estimates. Use `patterns` to run several globs in one call.",
             "inputSchema": {
                 "type": "object",
@@ -123,12 +134,17 @@ pub(in crate::mcp) fn tool_definitions(edit_mode: bool) -> Vec<Value> {
                     "budget": {
                         "type": "number",
                         "description": "Max tokens in response."
+                    },
+                    "root": {
+                        "type": "string",
+                        "description": "Absolute project root; anchors relative paths and scopes. Required with any relative path/scope."
                     }
                 }
             }
         }),
         serde_json::json!({
             "name": "tilth_deps",
+            "annotations": { "readOnlyHint": true },
             "description": "Blast-radius check before breaking changes. Shows what a file imports (local + external) and what other files call its exports, with symbol-level detail. Use ONLY when your planned edit changes a function signature, removes/renames an export, or modifies behavior that callers rely on. Do NOT use for reading files, adding new code, or internal-only changes — use tilth_read instead.",
             "inputSchema": {
                 "type": "object",
@@ -145,12 +161,17 @@ pub(in crate::mcp) fn tool_definitions(edit_mode: bool) -> Vec<Value> {
                     "budget": {
                         "type": "number",
                         "description": "Max tokens. Truncates 'Used by' first."
+                    },
+                    "root": {
+                        "type": "string",
+                        "description": "Absolute project root; anchors relative paths and scopes. Required with any relative path/scope."
                     }
                 }
             }
         }),
         serde_json::json!({
             "name": "tilth_grok",
+            "annotations": { "readOnlyHint": true },
             "description": "Get everything structural about a symbol in one call — definition, body, signature, doc, callees, callers, siblings, tests. Use ONLY for 'understand this symbol' questions. Do NOT use for concept search (use tilth_search) or reading file contents (use tilth_read).",
             "inputSchema": {
                 "type": "object",
@@ -168,12 +189,17 @@ pub(in crate::mcp) fn tool_definitions(edit_mode: bool) -> Vec<Value> {
                         "type": "boolean",
                         "default": false,
                         "description": "Widen caps: 50 callers, 30 callees, 30 siblings, 30 tests (default 5/5/8/8)."
+                    },
+                    "root": {
+                        "type": "string",
+                        "description": "Absolute project root; anchors relative paths and scopes. Required with any relative path/scope."
                     }
                 }
             }
         }),
         serde_json::json!({
             "name": "tilth_diff",
+            "annotations": { "readOnlyHint": true },
             "description": "Structural diff showing function-level changes. Replaces git diff. Call with no args for uncommitted changes overview.",
             "inputSchema": {
                 "type": "object",
@@ -223,11 +249,21 @@ pub(in crate::mcp) fn tool_definitions(edit_mode: bool) -> Vec<Value> {
                 }
             }
         }),
+        serde_json::json!({
+            "name": "tilth_savings",
+            "annotations": { "readOnlyHint": true },
+            "description": "Report tokens tilth saved this session vs naive grep/cat (conservative lower bound). Call ONLY when the user explicitly asks how much tilth saved — never proactively.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {}
+            }
+        }),
     ];
 
     if edit_mode {
         tools.push(serde_json::json!({
             "name": "tilth_write",
+            "annotations": { "readOnlyHint": false },
             "description": "Batch write one or more files in one call. Replaces the host Edit and Write tools — DO NOT use those. Three per-file modes: `hash` (default — replace lines at hash anchors from tilth_read), `overwrite` (whole file; create-only by default — pass `overwrite: true` to replace an existing file), `append` (append `content`, creates if absent). overwrite/append responses echo the file's hashlines so you can chain anchored edits in the next call without re-reading. ALWAYS group writes to multiple files into a single tilth_write call — never call tilth_write twice in a row. Each file is processed independently (best-effort): a failure on one file does not block the others; results are reported per file. Partial success returns isError: false — scan the per-file `## <path>` sections for failures rather than trusting the top-level status. A parse error on one edit invalidates ALL edits for that file (none applied); retry the whole file after fixing the malformed entry. Each file path may appear at most once per call. Max 20 files per call. Example overwrite (new file): `tilth_write(files: [{path: \"src/new.rs\", mode: \"overwrite\", content: \"fn main(){}\\n\"}])`.",
             "inputSchema": {
                 "type": "object",
@@ -244,7 +280,7 @@ pub(in crate::mcp) fn tool_definitions(edit_mode: bool) -> Vec<Value> {
                             "properties": {
                                 "path": {
                                     "type": "string",
-                                    "description": "Absolute or relative file path."
+                                    "description": "Absolute or relative file path. A relative path requires an absolute `root`; the server cannot see your shell cwd."
                                 },
                                 "mode": {
                                     "type": "string",
@@ -306,6 +342,10 @@ pub(in crate::mcp) fn tool_definitions(edit_mode: bool) -> Vec<Value> {
                         "type": "boolean",
                         "default": false,
                         "description": "Set true to include a compact diff of changes in the response per file."
+                    },
+                    "root": {
+                        "type": "string",
+                        "description": "Optional absolute path. When provided, every RELATIVE file path in this call is anchored under `root` instead of the server's process cwd. Absolute file paths are used as-is. Use this when the server was launched from a different directory than the worktree you are editing."
                     }
                 }
             }

@@ -4,6 +4,14 @@ All notable changes to tilth will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
+## [Unreleased] — incremental sync with upstream/main (v0.9.0 to e7ef464, 64 commits)
+
+Merged cleanly (no tree-merge needed — a prior ancestry fix made v0.9.0 a real
+git ancestor of this branch, so this landed as a normal 3-way merge). Only
+two conflicts: `.gitignore` (both sides added unrelated entries, kept both)
+and `src/lib.rs` (auto-resolved). `src/pager_guard.rs` is untouched and still
+wired into `emit_output()`.
+
 ## [Unreleased] — celstnblacc/tilth fork sync (v0.6.1 to v0.9.0)
 
 ### Added

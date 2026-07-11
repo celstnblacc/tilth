@@ -5,7 +5,8 @@
     clippy::cast_possible_wrap,        // u32→i32 for tree-sitter APIs
     clippy::module_name_repetitions,   // Rust naming conventions
     clippy::similar_names,             // common in parser/search code
-    clippy::too_many_lines,            // one complex function (find_definitions)
+    clippy::too_many_lines,            // crate-wide to cover find_definitions in src/search/symbol.rs;
+                                       // narrow to a per-function allow once a refactor shrinks that file
     clippy::too_many_arguments,        // internal recursive AST walker
     clippy::unnecessary_wraps,         // Result return for API consistency
     clippy::struct_excessive_bools,    // CLI struct derives clap
@@ -33,6 +34,7 @@ pub(crate) mod search;
 pub(crate) mod session;
 pub(crate) mod timeout;
 pub(crate) mod types;
+pub(crate) mod util;
 
 /// Re-exports for the fuzz harness. Not stable; do not depend on this.
 /// Items here are only `pub` so `fuzz/fuzz_targets/*.rs` can reach them
@@ -77,6 +79,10 @@ struct ExpandedCtx {
     /// concise outline — see the `piped_invocation_does_not_auto_expand`
     /// pin in `main.rs` for the larger design rule this enforces.
     full_search: bool,
+    /// Caller's real token budget, threaded into `fit_to_budget` so
+    /// value-based match selection engages at the caller's actual cap
+    /// instead of only above `DEFAULT_BUDGET`.
+    budget: Option<u64>,
 }
 
 /// The single public API. Everything flows through here:
@@ -244,8 +250,20 @@ fn run_inner(
             let bloom = index::bloom::BloomFilterCache::new();
             let expand = if expand > 0 { expand } else { 2 };
             let output = search::search_multi_symbol_expanded(
-                &parts, scope, cache, &session, &bloom, expand, None, glob, cli_full,
+                &parts,
+                scope,
+                cache,
+                &session,
+                &bloom,
+                expand,
+                None,
+                glob,
+                cli_full,
+                budget_tokens,
             )?;
+            // fit_to_budget (inside search_multi_symbol_expanded) already applied
+            // the real budget_tokens with value-based selection; budget::apply's
+            // own fast path is a no-op once output is already under budget.
             return match budget_tokens {
                 Some(b) => Ok(budget::apply(&output, b)),
                 None => Ok(output),
@@ -278,12 +296,17 @@ fn run_inner(
                 bloom: index::bloom::BloomFilterCache::new(),
                 expand,
                 full_search: cli_full,
+                budget: budget_tokens,
             };
             run_query_expanded(&query_type, scope, cache, &ctx, glob)?
         }
         _ => run_query_basic(&query_type, scope, cache, glob)?,
     };
 
+    // For the expanded-search branch, fit_to_budget already applied
+    // budget_tokens with value-based selection — this pass is then a no-op
+    // (already under budget). For FilePath/Glob (no fit_to_budget path),
+    // this remains the only enforcement, unchanged from before this fix.
     match budget_tokens {
         Some(b) => Ok(budget::apply(&output, b)),
         None => Ok(output),
@@ -310,6 +333,7 @@ fn run_query_expanded(
             None,
             glob,
             ctx.full_search,
+            ctx.budget,
         ),
         QueryType::Concept(text) if text.contains(' ') => search::search_content_expanded(
             text,
@@ -320,6 +344,7 @@ fn run_query_expanded(
             None,
             glob,
             ctx.full_search,
+            ctx.budget,
         ),
         // Single-word Concept and Fallthrough share the same expanded path:
         // both go straight to symbol_expanded, intentionally bypassing the
@@ -335,6 +360,7 @@ fn run_query_expanded(
             None,
             glob,
             ctx.full_search,
+            ctx.budget,
         ),
         QueryType::Content(text) => search::search_content_expanded(
             text,
@@ -345,6 +371,7 @@ fn run_query_expanded(
             None,
             glob,
             ctx.full_search,
+            ctx.budget,
         ),
         QueryType::Regex(pattern) => search::search_regex_expanded(
             pattern,
@@ -355,6 +382,7 @@ fn run_query_expanded(
             None,
             glob,
             ctx.full_search,
+            ctx.budget,
         ),
         // FilePath/Glob never reach here (gated by use_expanded)
         QueryType::FilePath(_) | QueryType::Glob(_) => {

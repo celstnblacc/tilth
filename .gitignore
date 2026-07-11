@@ -31,3 +31,7 @@ benchmark/results/*.md
 
 # ShipGuard SAST scanner local runtime state
 .shipguard/
+
+# Brand (petals) — pulled from the plotplot umbrella, kept local (never committed)
+.petalsrc
+.brand/
